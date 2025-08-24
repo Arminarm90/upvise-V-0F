@@ -1,0 +1,23 @@
+# --- Core ---
+python-telegram-bot
+httpx==0.26.0
+feedparser>=6.0.11
+beautifulsoup4>=4.12.3
+python-dotenv>=1.0.1
+
+# --- AI / Summarization ---
+google-generativeai>=0.5.2
+
+# --- Utilities ---
+python-dateutil>=2.9.0
+pytz>=2024.1
+
+# --- Dev & Testing ---
+pytest>=8.3.2
+
+# --- Language tools ---
+langdetect==1.0.9
+deep-translator==1.11.4
+
+# --- Search ---
+duckduckgo-search>=5.3.0

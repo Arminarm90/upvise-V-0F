@@ -1,0 +1,24 @@
+{
+  "394617203": {
+    "lang": "fa",
+    "feeds": [
+      "http://feeds.harvardbusiness.org/harvardbusiness?format=xml",
+      "https://finance.yahoo.com/rss/"
+    ],
+    "seen": {
+      "http://feeds.harvardbusiness.org/harvardbusiness?format=xml": [],
+      "https://finance.yahoo.com/rss/": []
+    }
+  },
+  "1324005362": {
+    "lang": "fa",
+    "feeds": [
+      "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
+      "https://www.wired.com/feed"
+    ],
+    "seen": {
+      "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en": [],
+      "https://www.wired.com/feed": []
+    }
+  }
+}
