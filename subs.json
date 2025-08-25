@@ -11,14 +11,25 @@
     }
   },
   "1324005362": {
-    "lang": "fa",
+    "lang": "en",
     "feeds": [
       "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en",
       "https://www.wired.com/feed"
     ],
     "seen": {
       "https://news.google.com/rss?hl=en-US&gl=US&ceid=US:en": [],
-      "https://www.wired.com/feed": []
+      "https://www.wired.com/feed": [
+        "687e65564fbf768762656cd5",
+        "68a629997e5a81ab6b12dc7b",
+        "68a87cfd3be8cf1301ced0cb",
+        "66ba4f5923244ea81607f6ec",
+        "68a4f6f9957dfc36acb16673",
+        "64677ce788479249e0cc2920",
+        "680a831d1fc915c34efef23f",
+        "5cd0b22e007b1f46ba283d66",
+        "68225b9544db1beca22d595d",
+        "6894a682e3d9ce05f96d91e2"
+      ]
     }
   }
 }

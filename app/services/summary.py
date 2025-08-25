@@ -171,43 +171,43 @@ class Summarizer:
             return "", []
 
     # ---------- NEW: Lite summary with enforced language ----------
-    def _lite_summary(self, title: str, text: str) -> Tuple[str, List[str]]:
-        """
-        Heuristic TLDR + bullets from the raw text (no AI).
-        Then enforces prompt_lang via translate helpers.
-        """
-        src = (text or "").strip()
-        if not src:
-            return "", []
+    # def _lite_summary(self, title: str, text: str) -> Tuple[str, List[str]]:
+    #     """
+    #     Heuristic TLDR + bullets from the raw text (no AI).
+    #     Then enforces prompt_lang via translate helpers.
+    #     """
+    #     src = (text or "").strip()
+    #     if not src:
+    #         return "", []
 
-        # TLDR: first 1–2 sentences (bounded)
-        sentences = re.split(r"(?<=[.!؟\?])\s+", src)
-        tldr = " ".join(sentences[:2]).strip()
-        tldr = re.sub(r"\s+", " ", tldr)[:300]
+    #     # TLDR: first 1–2 sentences (bounded)
+    #     sentences = re.split(r"(?<=[.!؟\?])\s+", src)
+    #     tldr = " ".join(sentences[:2]).strip()
+    #     tldr = re.sub(r"\s+", " ", tldr)[:300]
 
-        # bullets: pick ~3–6 meaningful lines
-        points: List[str] = []
-        for line in re.split(r"[\n\r]+", src):
-            line = line.strip()
-            if not line:
-                continue
-            if len(line) < 40:
-                continue
-            if any(k in line.lower() for k in ("should", "will", "can", "lead", "include", "increase", "reduce", "cause", "help", "need", "است", "می‌شود", "می‌تواند", "خواهد")):
-                points.append(line)
-            if len(points) >= getattr(settings, "summary_max_bullets", 4):
-                break
+    #     # bullets: pick ~3–6 meaningful lines
+    #     points: List[str] = []
+    #     for line in re.split(r"[\n\r]+", src):
+    #         line = line.strip()
+    #         if not line:
+    #             continue
+    #         if len(line) < 40:
+    #             continue
+    #         if any(k in line.lower() for k in ("should", "will", "can", "lead", "include", "increase", "reduce", "cause", "help", "need", "است", "می‌شود", "می‌تواند", "خواهد")):
+    #             points.append(line)
+    #         if len(points) >= getattr(settings, "summary_max_bullets", 4):
+    #             break
 
-        if not points:
-            # fallback to longer sentences as bullets
-            long_sents = [s for s in sentences if len(s) > 50]
-            points = long_sents[: getattr(settings, "summary_max_bullets", 4)]
+    #     if not points:
+    #         # fallback to longer sentences as bullets
+    #         long_sents = [s for s in sentences if len(s) > 50]
+    #         points = long_sents[: getattr(settings, "summary_max_bullets", 4)]
 
-        bullets = _dedupe_cap(points, cap=getattr(settings, "summary_max_bullets", 4))
+    #     bullets = _dedupe_cap(points, cap=getattr(settings, "summary_max_bullets", 4))
 
-        # ENFORCE language
-        tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
-        return tldr, bullets
+    #     # ENFORCE language
+    #     tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
+    #     return tldr, bullets
     # -------------------------------------------------------------
 
     async def summarize(
@@ -220,15 +220,15 @@ class Summarizer:
         if not base:
             return "", []
 
-        # 1) Try AI
+        # Try AI and return the result directly
         tldr, bullets = await self._call_ai(title, base)
-        if tldr or bullets:
-            return tldr, bullets
-
-        # 2) Second attempt AI (ask for bullets)
-        tldr, bullets = await self._call_ai(title, base + "\n(Please ensure at least 3 bullet points.)")
-        if tldr or bullets:
-            return tldr, bullets
+        
+        # Optionally, you can add a second attempt here as well if the first one fails
+        if not (tldr or bullets):
+            tldr, bullets = await self._call_ai(title, base + "\n(Please ensure at least 3 bullet points.)")
+            
+        # Return AI result or empty if both attempts fail
+        return tldr, bullets
 
         # 3) Lite fallback (guaranteed)
-        return self._lite_summary(title, base)
+        # return self._lite_summary(title, base)

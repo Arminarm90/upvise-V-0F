@@ -2,42 +2,38 @@
   "menu.start": "Start",
   "menu.add": "Add site",
   "menu.list": "List feeds",
-  "menu.remove": "Remove",
-  "menu.lang": "Language",
+  "menu.remove": "Remove link",
+  "menu.lang": "Change language",
   "menu.help": "Help",
 
-  "list.title": "📜 Feeds:",
-  "list.empty": "No feeds yet.",
+  "btn.fa": "🇮🇷 فارسی",
+  "btn.en": "🇬🇧 English",
+  "btn.prev": "◀️ Prev",
+  "btn.next": "Next ▶️",
+  "btn.close": "Close ✖️",
+
+  "start.hello": "Hi! I’m Upvise — your feed & page summarizer.\nPick a language so menus and summaries match it.",
+  "start.commands_hint": "Use the menu or commands below:",
+
+  "help.text": "I can watch RSS or site homepages, find fresh items, and send short summaries in English/Persian.\n\nCommands:\n/start — Start\n/add — Add site/feed\n/list — List sources\n/remove — Remove link\n/lang — Choose language\n/help — Help",
+
+  "lang.choose": "Choose the bot language:",
+  "lang.set": "✅ Bot language switched to “${lang_name}”.",
+  "lang.already": "You’re already using “${lang_name}”.",
+
+  "list.title": "📜 Your feeds",
+  "list.empty": "No feeds added yet.",
   "list.page": "Page ${page}/${pages}",
-  "btn.prev": "⬅ Prev",
-  "btn.next": "Next ➡",
-  "btn.close": "✖ Close",
 
-  "lang.choose": "Choose bot language:",
-  "lang.set": "Language set to “${lang_name}”.",
-  "btn.fa": "فارسی",
-  "btn.en": "English",
-
-  "sys.error": "An error occurred.",
-  "sys.saved": "Saved.",
-  "sys.removed": "Removed.",
-
-  "start.hello": "Hello 👋",
-  "start.commands_hint": "Commands:",
-
-  "help.text": "Help:\n/add → Send the site link (e.g., https://example.com). I’ll auto‑discover an RSS feed or watch the page.\n/remove <url> Remove a feed or page‑watch\n/list List your subscriptions\n/lang Change language",
-
-  "add.ask_site": "Please send the site link 🌐",
-  "add.invalid_url": "❌ The link seems invalid. Try again or /cancel",
+  "add.ask_site": "Send a site/feed link.",
+  "add.invalid_url": "❌ Not a valid URL. Try again.",
   "add.checking": "🔎 Checking the link…",
-  "add.added_feed": "✅ Valid feed detected and added.",
-  "add.already_added": "ℹ️ This item was already added.",
-  "add.feed_found_added": "✅ A feed was found and added to your list.",
-  "add.pagewatch_enabled": "ℹ️ No RSS found. The page will be intelligently monitored ✅",
-  "add.error_generic": "❌ Couldn’t save the link. Please try again later.",
-  "add.cancelled": "Add operation cancelled.",
-
-  "summary.preparing": "⏳ Preparing the summary…",
+  "add.added_feed": "✅ Feed added.",
+  "add.feed_found_added": "✅ Found an RSS feed and added it.",
+  "add.already_added": "ℹ️ This source is already added.",
+  "add.pagewatch_enabled": "✅ Page‑watch enabled (when no RSS found).",
+  "add.error_generic": "⚠️ Unexpected error. Please try later.",
+  "add.cancelled": "⛔️ Add flow cancelled.",
 
   "msg.source": "Source",
   "msg.untitled": "Untitled"
