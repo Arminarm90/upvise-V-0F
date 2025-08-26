@@ -31,10 +31,14 @@
   "add.added_feed": "✅ Feed added.",
   "add.feed_found_added": "✅ Found an RSS feed and added it.",
   "add.already_added": "ℹ️ This source is already added.",
-  "add.pagewatch_enabled": "✅ Page‑watch enabled (when no RSS found).",
+  "add.pagewatch_enabled": "✅ Page-watch enabled (when no RSS found).",
   "add.error_generic": "⚠️ Unexpected error. Please try later.",
   "add.cancelled": "⛔️ Add flow cancelled.",
 
   "msg.source": "Source",
-  "msg.untitled": "Untitled"
+  "msg.untitled": "Untitled",
+
+  "msg.opportunities": "Opportunities",
+  "msg.risks": "Risks",
+  "msg.signal": "Signal"
 }

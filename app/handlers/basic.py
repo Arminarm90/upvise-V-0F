@@ -6,13 +6,20 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 from app.utils.i18n import t, get_chat_lang
 
-def _maybe_auto_delete(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int) -> None:
+async def _maybe_auto_delete(ctx: ContextTypes.DEFAULT_TYPE, chat_id: int, message_id: int) -> None:
+    """
+    اگر حالت موقت (ephemeral) فعال باشد، وظیفهٔ حذف خودکار پیام را
+    به صورت پس‌زمینه‌ای زمان‌بندی می‌کند. این تابع عمداً چیزی را await
+    نمی‌کند تا جریان پاسخ‌دهی کاربر را مسدود نکند.
+    """
     try:
         if ctx.bot_data.get("ephemeral_mode", True):
             auto_delete = ctx.bot_data.get("auto_delete")
             if callable(auto_delete):
+                # auto_delete باید یک coroutine function باشد؛ آن را به صورت background task اجرا می‌کنیم.
                 ctx.application.create_task(auto_delete(ctx, chat_id, message_id))
     except Exception:
+        # هرگونه خطای جانبی در مسیر حذف خودکار نباید تجربهٔ کاربر را خراب کند.
         pass
 
 def render_welcome(lang: str) -> tuple[str, InlineKeyboardMarkup]:
@@ -46,7 +53,13 @@ def render_welcome(lang: str) -> tuple[str, InlineKeyboardMarkup]:
 
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    lang = get_chat_lang(ctx.bot_data["store"], chat_id)
+    store = ctx.bot_data["store"]
+    
+    # NEW: گرفتن نام کامل کاربر و ثبت‌نام در StateStore
+    user_full_name = update.effective_user.full_name or update.effective_user.first_name
+    store.register_user(chat_id, user_full_name)
+
+    lang = get_chat_lang(store, chat_id)
 
     text, kb = render_welcome(lang)
     sent = await update.effective_message.reply_text(

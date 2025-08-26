@@ -27,21 +27,29 @@ def _system_prompt(lang: str) -> str:
     if (lang or "").lower().startswith("fa"):
         return (
             "خروجی فقط فارسی و روان باشد. لحن تحلیلی و کاربردی.\n"
-            "دقیقاً JSON زیر را برگردان و هیچ متن اضافه ننویس:\n"
+            "دقیقاً و فقط یک JSON با کلیدهای زیر برگردان؛ هیچ متن اضافه ننویس. "
+            "اگر هر بخشی دادهٔ کافی نداشت، مقدار همان بخش را خالی بگذار (آرایهٔ خالی [] یا رشتهٔ خالی \"\").\n"
             "{"
-            "\"tldr\":\"۱–۳ جمله جمع‌بندی تحلیلی، بدون تکرار عنوان\","
-            "\"bullets\":[\"۳ تا ۶ نکتهٔ نتیجه‌محور؛ هر نکته با فعل شروع شود\"]"
+            "\"tldr\":\"۱–۳ جملهٔ جمع‌بندی تحلیلی؛ از تکرار عنوان خودداری کن\","
+            "\"bullets\":[\"۳ تا ۶ نکتهٔ نتیجه‌محور؛ هر نکته با فعل شروع شود\"],"
+            "\"opportunities\":[\"فرصت‌های کلیدی، مختصر و عملی\"],"
+            "\"risks\":[\"ریسک‌ها/محدودیت‌ها، شفاف و واقع‌گرایانه\"],"
+            "\"signal\":\"یک پیام/سیگنال کاربردی برای خواننده (در یک یا دو جمله)\""
             "}\n"
-            "اگر داده ناکافی بود، محتاطانه خلاصه کن؛ اما فقط همین JSON."
+            "اگر داده ناکافی بود، محتاطانه خلاصه کن؛ اما باز هم فقط همین JSON را برگردان."
         )
     return (
-        "Output must be in clear English. Analytical and practical tone.\n"
-        "Return exactly this JSON and nothing else:\n"
+        "Output must be in clear English with an analytical, practical tone.\n"
+        "Return EXACTLY one JSON object with the keys below and nothing else. "
+        "If any section lacks sufficient content, leave it empty (use [] for lists and \"\" for strings).\n"
         "{"
-        "\"tldr\":\"1–3 analytical sentences, do not repeat the title\","
-        "\"bullets\":[\"3 to 6 action-oriented key points; each starts with a verb\"]"
+        "\"tldr\":\"1–3 analytical sentences; do not repeat the title\","
+        "\"bullets\":[\"3–6 action-oriented key points; each starts with a verb\"],"
+        "\"opportunities\":[\"Concise, actionable opportunities\"],"
+        "\"risks\":[\"Clear, realistic risks/limitations\"],"
+        "\"signal\":\"One concise, practical takeaway for the reader\""
         "}\n"
-        "If content is limited, summarize cautiously; still return this JSON."
+        "If content is limited, summarize cautiously; still return ONLY this JSON."
     )
 
 
@@ -113,6 +121,38 @@ def _force_lang(tldr: str, bullets: List[str], target_lang: str) -> Tuple[str, L
     tldr_t = _translate(tldr, tgt) if tldr else ""
     bullets_t = [ _translate(b, tgt) for b in (bullets or []) ]
     return tldr_t or tldr, bullets_t or bullets
+
+# ---------- NEW: language enforcement for premium fields ----------
+def _force_lang_full(
+    tldr: str,
+    bullets: List[str],
+    opportunities: List[str],
+    risks: List[str],
+    signal: str,
+    target_lang: str,
+) -> Tuple[str, List[str], List[str], List[str], str]:
+    """
+    همان منطق _force_lang اما روی همهٔ فیلدهای پرمیوم نیز اعمال می‌شود.
+    """
+    tldr2, bullets2 = _force_lang(tldr, bullets, target_lang)
+
+    tgt = (target_lang or "").lower()
+    if not tgt:
+        return tldr2, bullets2, opportunities, risks, signal
+
+    # تصمیم ترجمه بر اساس همان شرط سخت‌گیرانه
+    strict = str(getattr(settings, "summary_strict", "false")).lower() == "true"
+    sample = " ".join((opportunities or []) + (risks or []) + ([signal] if signal else []))[:400]
+    src = _detect_lang(sample)
+    must_translate = strict or (src and src != tgt)
+
+    if not must_translate:
+        return tldr2, bullets2, opportunities, risks, signal
+
+    opp2 = [ _translate(x, tgt) for x in (opportunities or []) ]
+    risk2 = [ _translate(x, tgt) for x in (risks or []) ]
+    sig2  = _translate(signal, tgt) if signal else signal
+    return tldr2, bullets2, opp2 or opportunities, risk2 or risks, sig2 or signal
 # --------------------------------------------
 
 
@@ -153,10 +193,10 @@ class Summarizer:
             tldr = (data.get("tldr") or "").strip()
             bullets = _dedupe_cap(
                 [x for x in (data.get("bullets") or []) if isinstance(x, str)],
-                cap=settings.summary_max_bullets,
+                cap=getattr(settings, "summary_max_bullets", 4),
             )
 
-            # NEW: force output language if needed
+            # enforce language
             tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
 
             self._fail_count = 0
@@ -165,12 +205,86 @@ class Summarizer:
 
         except Exception:
             self._fail_count += 1
-            if self._fail_count >= settings.summary_cb_errors:
+            if self._fail_count >= getattr(settings, "summary_cb_errors", 3):
                 import time
-                self._cooldown_until = time.time() + settings.summary_cb_cooldown_sec
+                self._cooldown_until = time.time() + getattr(settings, "summary_cb_cooldown_sec", 60)
             return "", []
 
-    # ---------- NEW: Lite summary with enforced language ----------
+    # ---------- NEW: full premium summary ----------
+    async def summarize_full(
+        self, title: str, text: str, author: Optional[str] = None
+    ) -> Tuple[str, List[str], List[str], List[str], str]:
+        """
+        خروجی پرمیوم: (tldr, bullets, opportunities, risks, signal)
+        - اگر مدل/کلید در دسترس نباشد یا خطا دهد → خروجی امن با فیلدهای خالی.
+        - زبان خروجی روی همهٔ فیلدها enforce می‌شود.
+        """
+        title = (title or "").strip()
+        text = (text or "").strip()
+        base = (text if len(text) > getattr(settings, "summary_lite_min_len", 120) else f"{title}\n{text}").strip()
+        if not base:
+            return "", [], [], [], ""
+
+        if not (genai and self.api_key):
+            return "", [], [], [], ""
+
+        import time
+        if self._cooldown_until and time.time() < self._cooldown_until:
+            return "", [], [], [], ""
+
+        try:
+            genai.configure(api_key=self.api_key)
+            model = genai.GenerativeModel(settings.summary_model_name)
+
+            prompt = (
+                _system_prompt(self.prompt_lang)
+                + f"\nTitle: {title or '-'}\n"
+                + f"Content:\n{(base or '')[:getattr(settings, 'summary_max_input_chars', 6000)]}"
+            )
+
+            resp = await model.generate_content_async(prompt)
+            raw = _strip_code_fences(getattr(resp, "text", "") or "")
+            data = json.loads(raw)
+
+            # base fields
+            tldr = (data.get("tldr") or "").strip()
+            bullets = _dedupe_cap(
+                [x for x in (data.get("bullets") or []) if isinstance(x, str)],
+                cap=getattr(settings, "summary_max_bullets", 4),
+            )
+
+            # premium fields
+            opp_cap = int(getattr(settings, "summary_max_opportunities", getattr(settings, "summary_max_bullets", 4)))
+            risk_cap = int(getattr(settings, "summary_max_risks", getattr(settings, "summary_max_bullets", 4)))
+
+            opportunities = _dedupe_cap(
+                [x for x in (data.get("opportunities") or []) if isinstance(x, str)],
+                cap=opp_cap,
+            )
+            risks = _dedupe_cap(
+                [x for x in (data.get("risks") or []) if isinstance(x, str)],
+                cap=risk_cap,
+            )
+            signal = (data.get("signal") or "").strip()
+
+            # enforce language on all
+            tldr, bullets, opportunities, risks, signal = _force_lang_full(
+                tldr, bullets, opportunities, risks, signal, self.prompt_lang
+            )
+
+            self._fail_count = 0
+            self._cooldown_until = None
+            return tldr, bullets, opportunities, risks, signal
+
+        except Exception:
+            self._fail_count += 1
+            if self._fail_count >= getattr(settings, "summary_cb_errors", 3):
+                import time
+                self._cooldown_until = time.time() + getattr(settings, "summary_cb_cooldown_sec", 60)
+            # بازگشت امن با فیلدهای خالی
+            return "", [], [], [], ""
+
+    # ---------- Lite summary (kept disabled) ----------
     # def _lite_summary(self, title: str, text: str) -> Tuple[str, List[str]]:
     #     """
     #     Heuristic TLDR + bullets from the raw text (no AI).
@@ -179,13 +293,9 @@ class Summarizer:
     #     src = (text or "").strip()
     #     if not src:
     #         return "", []
-
-    #     # TLDR: first 1–2 sentences (bounded)
     #     sentences = re.split(r"(?<=[.!؟\?])\s+", src)
     #     tldr = " ".join(sentences[:2]).strip()
     #     tldr = re.sub(r"\s+", " ", tldr)[:300]
-
-    #     # bullets: pick ~3–6 meaningful lines
     #     points: List[str] = []
     #     for line in re.split(r"[\n\r]+", src):
     #         line = line.strip()
@@ -197,18 +307,12 @@ class Summarizer:
     #             points.append(line)
     #         if len(points) >= getattr(settings, "summary_max_bullets", 4):
     #             break
-
     #     if not points:
-    #         # fallback to longer sentences as bullets
     #         long_sents = [s for s in sentences if len(s) > 50]
     #         points = long_sents[: getattr(settings, "summary_max_bullets", 4)]
-
     #     bullets = _dedupe_cap(points, cap=getattr(settings, "summary_max_bullets", 4))
-
-    #     # ENFORCE language
     #     tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
     #     return tldr, bullets
-    # -------------------------------------------------------------
 
     async def summarize(
         self, title: str, text: str, author: Optional[str] = None
@@ -216,19 +320,19 @@ class Summarizer:
         title = (title or "").strip()
         text = (text or "").strip()
 
-        base = (text if len(text) > settings.summary_lite_min_len else f"{title}\n{text}").strip()
+        base = (text if len(text) > getattr(settings, "summary_lite_min_len", 120) else f"{title}\n{text}").strip()
         if not base:
             return "", []
 
         # Try AI and return the result directly
         tldr, bullets = await self._call_ai(title, base)
-        
-        # Optionally, you can add a second attempt here as well if the first one fails
+
+        # Optional second attempt
         if not (tldr or bullets):
             tldr, bullets = await self._call_ai(title, base + "\n(Please ensure at least 3 bullet points.)")
-            
+
         # Return AI result or empty if both attempts fail
         return tldr, bullets
 
-        # 3) Lite fallback (guaranteed)
+        # 3) Lite fallback (disabled)
         # return self._lite_summary(title, base)

@@ -36,5 +36,9 @@
   "add.cancelled": "⛔️ عملیات افزودن لغو شد.",
 
   "msg.source": "منبع",
-  "msg.untitled": "بدون عنوان"
+  "msg.untitled": "بدون عنوان",
+
+  "msg.opportunities": "فرصت‌ها",
+  "msg.risks": "ریسک‌ها",
+  "msg.signal": "سیگنال"
 }

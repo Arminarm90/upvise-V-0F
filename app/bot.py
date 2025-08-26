@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from .config import settings
 from .storage.state import StateStore
@@ -31,6 +31,40 @@ def _commands_for_lang(code: str) -> list[BotCommand]:
         BotCommand("lang",   t("menu.lang",   code)),
         BotCommand("help",   t("menu.help",   code)),
     ]
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Error handler سراسری:
+      - خطاهای رایج و بی‌خطر را بی‌صدا نادیده می‌گیرد (برای کاهش نویز لاگ)
+      - سایر خطاها را همراه با سرنخ‌های مفید لاگ می‌کند
+    """
+    err = context.error
+    msg = str(err or "").lower()
+
+    # موارد پرتکرار و بی‌خطر
+    try:
+        from telegram.error import BadRequest, Forbidden
+        if isinstance(err, BadRequest):
+            if "message is not modified" in msg:
+                LOG.debug("Ignored benign error: message is not modified")
+                return
+            if "chat not found" in msg:
+                LOG.warning("Chat not found (ignored). Update=%s", getattr(update, "to_dict", lambda: update)())
+                return
+        if isinstance(err, Forbidden) and "bot was blocked by the user" in msg:
+            LOG.warning("Bot blocked by user (ignored).")
+            return
+    except Exception:
+        # اگر ایمپورت یا تشخیص خطا شکست خورد، ادامه می‌دهیم تا لاگ استثناء ثبت شود
+        pass
+
+    # لاگ کامل برای سایر خطاها
+    try:
+        upd_repr = getattr(update, "to_dict", lambda: update)()
+    except Exception:
+        upd_repr = repr(update)
+    LOG.exception("Unhandled error | update=%s", upd_repr, exc_info=err)
 
 
 def build_app() -> Application:
@@ -96,6 +130,9 @@ def build_app() -> Application:
     # /lang + تغییر زبان با دکمه‌ها
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CallbackQueryHandler(cb_lang, pattern=r"^lang:"))
+
+    # ---- Error handler سراسری
+    app.add_error_handler(on_error)
 
     # ---- Job: پولینگ دوره‌ای
     async def poll_job(ctx):

@@ -72,6 +72,35 @@ class StateStore:
         self._state[cid] = {"lang": lang, "feeds": feeds, "seen": seen}
         self.save()
 
+    def register_user(self, chat_id: int | str, account_name: str) -> None:
+        cid = str(chat_id)
+        # فقط در صورتی که کاربر وجود ندارد، اطلاعات را اضافه می‌کنیم
+        if cid not in self._state:
+            self._state[cid] = {
+                "account_name": account_name,
+                "lang": "fa", 
+                "feeds": [],
+                "seen": {}
+            }
+            self.save()
+            
+    def drop_chat(self, chat_id: int | str) -> bool:
+        """
+        حذف کامل یک چت از ذخیره (برای موارد 'Chat not found' یا 'bot blocked').
+        خروجی: True اگر وجود داشت و حذف شد؛ False اگر اصلاً نبود.
+        """
+        cid = str(chat_id)
+        if cid in self._state:
+            try:
+                del self._state[cid]
+                self.save()
+                return True
+            except Exception:
+                # در صورت بروز خطا، وضعیت در حافظه ممکن است حذف شده باشد اما ذخیره ناموفق بماند.
+                # این سناریو نادر است و در چرخهٔ بعدی با _load بازسازی خواهد شد.
+                return False
+        return False
+
     # ---------------------- عملیات روی فیدها ----------------------
     def list_feeds(self, chat_id: int | str) -> List[str]:
         cid = str(chat_id)
@@ -79,27 +108,40 @@ class StateStore:
 
     def add_feed(self, chat_id: int | str, url: str) -> bool:
         cid = str(chat_id)
-        st = self._state.get(cid, {})
+        st = self._state.setdefault(cid, {})  # <-- تغییر اصلی
         feeds = list(st.get("feeds", []) or [])
         seen = dict(st.get("seen", {}) or {})
+        
         if url in feeds:
             return False
+            
         feeds.append(url)
         seen.setdefault(url, [])
-        self._state[cid] = {"lang": st.get("lang"), "feeds": feeds, "seen": seen}
+        
+        # ✅ تغییر اصلی: فقط فیلدهای مربوطه را به‌روزرسانی می‌کنیم.
+        st["feeds"] = feeds
+        st["seen"] = seen
         self.save()
         return True
 
     def remove_feed(self, chat_id: int | str, url: str) -> bool:
         cid = str(chat_id)
         st = self._state.get(cid, {})
+        if not st:
+            return False
+            
         feeds = list(st.get("feeds", []) or [])
         seen = dict(st.get("seen", {}) or {})
+        
         if url not in feeds:
             return False
+            
         feeds.remove(url)
         seen.pop(url, None)
-        self._state[cid] = {"lang": st.get("lang"), "feeds": feeds, "seen": seen}
+        
+        # ✅ تغییر اصلی: فقط فیلدهای مربوطه را به‌روزرسانی می‌کنیم.
+        st["feeds"] = feeds
+        st["seen"] = seen
         self.save()
         return True
 
@@ -107,15 +149,20 @@ class StateStore:
     def get_seen(self, chat_id: int | str, url: str) -> set[str]:
         cid = str(chat_id)
         st = self._state.get(cid, {})
+        # نیازی به تغییر نیست؛ فقط می‌خواند
         return set(st.get("seen", {}).get(url, []) or [])
 
     def set_seen(self, chat_id: int | str, url: str, seen_set: Iterable[str]) -> None:
         cid = str(chat_id)
-        st = self._state.get(cid, {})
+        st = self._state.setdefault(cid, {})  # <-- تغییر اصلی
         feeds = list(st.get("feeds", []) or [])
         seen = dict(st.get("seen", {}) or {})
+        
         seen[url] = list(seen_set)
-        self._state[cid] = {"lang": st.get("lang"), "feeds": feeds, "seen": seen}
+        
+        # ✅ تغییر اصلی: فقط فیلدهای مربوطه را به‌روزرسانی می‌کنیم.
+        st["feeds"] = feeds
+        st["seen"] = seen
         self.save()
 
     # ---------------------- پیمایش ----------------------

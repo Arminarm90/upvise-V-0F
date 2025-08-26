@@ -10,6 +10,7 @@ from telegram import (
     BotCommandScopeChat,
 )
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest  # <-- NEW: مدیریت دقیق خطای ادیت پیام
 from app.utils.i18n import t, get_chat_lang, set_chat_lang
 
 SUPPORTED = {"fa": "فارسی", "en": "English"}
@@ -83,6 +84,10 @@ async def cb_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # پیام خوش‌آمد معمولاً ماندگار است؛ اگر دوست دارید، حذف موقت نکنید.
             # await _maybe_auto_delete(ctx, chat_id, edited.message_id)
             return
+        except BadRequest as e:  # <-- NEW: نادیده‌گرفتن "message is not modified"
+            if "message is not modified" in str(e).lower():
+                return  # بی‌صدا خروج؛ نیازی به پیام جدید نیست
+            # سایر BadRequest ها را به مسیر عادی بسپار
         except Exception:
             pass  # اگر ادیت نشد، مسیر عادی ادامه یابد
 
@@ -97,6 +102,12 @@ async def cb_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         await q.edit_message_text(
+            msg_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True
+        )
+    except BadRequest as e:  # <-- NEW: مدیریت خاص خطاهای ادیت
+        if "message is not modified" in str(e).lower():
+            return  # هیچ تغییری لازم نبود؛ پیام جدید ارسال نکن
+        await q.message.reply_text(
             msg_text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True
         )
     except Exception:
