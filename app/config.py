@@ -106,7 +106,7 @@ class Settings:
     max_pagewatch_links_per_cycle: int = _get_int("MAX_PAGEWATCH_LINKS_PER_CYCLE", 3)
 
     # --- Summarizer / Summary Chain ---
-    summary_model_name: str = os.getenv("SUMMARY_MODEL_NAME", "gemini-1.5-flash")
+    summary_model_name: str = os.getenv("SUMMARY_MODEL_NAME", "gemini-2.0-flash")
     summary_max_input_chars: int = _get_int("SUMMARY_MAX_INPUT_CHARS", 6000)
     summary_cb_errors: int = _get_int("SUMMARY_CB_ERRORS", 5)
     summary_cb_cooldown_sec: int = _get_int("SUMMARY_CB_COOLDOWN_SEC", 300)
