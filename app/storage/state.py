@@ -66,18 +66,19 @@ class StateStore:
         cid = str(chat_id)
         cur = self._state.get(cid, {})
         # ادغام محتوا
+        name = data.get("name", cur.get("name"))
         lang = data.get("lang", cur.get("lang"))
         feeds = list(data.get("feeds", cur.get("feeds", [])) or [])
         seen = dict(data.get("seen", cur.get("seen", {})) or {})
-        self._state[cid] = {"lang": lang, "feeds": feeds, "seen": seen}
+        self._state[cid] = {"name": name, "lang": lang, "feeds": feeds, "seen": seen}
         self.save()
 
-    def register_user(self, chat_id: int | str, account_name: str) -> None:
+    def register_user(self, chat_id: int | str, name: str) -> None:
         cid = str(chat_id)
         # فقط در صورتی که کاربر وجود ندارد، اطلاعات را اضافه می‌کنیم
         if cid not in self._state:
             self._state[cid] = {
-                "account_name": account_name,
+                "name": name,
                 "lang": "fa", 
                 "feeds": [],
                 "seen": {}
@@ -149,7 +150,6 @@ class StateStore:
     def get_seen(self, chat_id: int | str, url: str) -> set[str]:
         cid = str(chat_id)
         st = self._state.get(cid, {})
-        # نیازی به تغییر نیست؛ فقط می‌خواند
         return set(st.get("seen", {}).get(url, []) or [])
 
     def set_seen(self, chat_id: int | str, url: str, seen_set: Iterable[str]) -> None:

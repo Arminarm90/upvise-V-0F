@@ -155,6 +155,21 @@ def _force_lang_full(
     return tldr2, bullets2, opp2 or opportunities, risk2 or risks, sig2 or signal
 # --------------------------------------------
 
+def _extract_json(raw: str) -> str:
+    """
+    سعی می‌کنه از متن خام Gemini فقط JSON خالص رو بکشه بیرون.
+    """
+    if not raw:
+        return "{}"
+    # حذف بلاک‌های ```json ... ```
+    cleaned = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.I | re.M).strip()
+    # پیدا کردن اولین و آخرین { }
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start:end+1]
+    return cleaned
+
 
 class Summarizer:
     """
@@ -171,8 +186,6 @@ class Summarizer:
     async def _call_ai(self, title: str, text: str) -> Tuple[str, List[str]]:
         if not (genai and self.api_key):
             return "", []
-
-        import time
         if self._cooldown_until and time.time() < self._cooldown_until:
             return "", []
 
@@ -187,23 +200,23 @@ class Summarizer:
             )
 
             resp = await model.generate_content_async(prompt)
-            raw = _strip_code_fences(getattr(resp, "text", "") or "")
-            data = json.loads(raw)
+            raw = getattr(resp, "text", "") or ""
+
+            # 🔎 لاگ برای دیباگ
+            # print("=== RAW AI OUTPUT ===", raw[:500])
+
+            json_str = _extract_json(raw)
+            data = json.loads(json_str)
 
             tldr = (data.get("tldr") or "").strip()
-            bullets = _dedupe_cap(
-                [x for x in (data.get("bullets") or []) if isinstance(x, str)],
-                cap=getattr(settings, "summary_max_bullets", 4),
-            )
+            bullets = _dedupe_cap(data.get("bullets") or [], cap=getattr(settings, "summary_max_bullets", 4))
 
-            # enforce language
             tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
-
-            self._fail_count = 0
-            self._cooldown_until = None
+            self._fail_count, self._cooldown_until = 0, None
             return tldr, bullets
 
-        except Exception:
+        except Exception as e:
+            import logging; logging.error(f"AI summary error: {e}", exc_info=True)
             self._fail_count += 1
             if self._fail_count >= getattr(settings, "summary_cb_errors", 3):
                 import time
