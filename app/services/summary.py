@@ -186,6 +186,8 @@ class Summarizer:
     async def _call_ai(self, title: str, text: str) -> Tuple[str, List[str]]:
         if not (genai and self.api_key):
             return "", []
+
+        import time
         if self._cooldown_until and time.time() < self._cooldown_until:
             return "", []
 
@@ -200,28 +202,38 @@ class Summarizer:
             )
 
             resp = await model.generate_content_async(prompt)
-            raw = getattr(resp, "text", "") or ""
+            raw = _strip_code_fences(getattr(resp, "text", "") or "")
 
-            # 🔎 لاگ برای دیباگ
-            # print("=== RAW AI OUTPUT ===", raw[:500])
+            # --- نرم‌تر کردن JSON parsing ---
+            tldr, bullets = "", []
+            try:
+                data = json.loads(raw)
+                tldr = (data.get("tldr") or "").strip()
+                bullets = _dedupe_cap(
+                    [x for x in (data.get("bullets") or []) if isinstance(x, str)],
+                    cap=settings.summary_max_bullets,
+                )
+            except Exception:
+                # ❗ اگر JSON خراب بود، خام متن رو برگردون
+                tldr = raw.strip()[:300]
+                bullets = []
 
-            json_str = _extract_json(raw)
-            data = json.loads(json_str)
+            # enforce language (اما فقط اگر چیزی وجود داشت)
+            if tldr or bullets:
+                tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
 
-            tldr = (data.get("tldr") or "").strip()
-            bullets = _dedupe_cap(data.get("bullets") or [], cap=getattr(settings, "summary_max_bullets", 4))
-
-            tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
-            self._fail_count, self._cooldown_until = 0, None
+            self._fail_count = 0
+            self._cooldown_until = None
             return tldr, bullets
 
-        except Exception as e:
-            import logging; logging.error(f"AI summary error: {e}", exc_info=True)
+        except Exception as ex:
+            # فقط برای خطای جدی fail counter زیاد شه
             self._fail_count += 1
-            if self._fail_count >= getattr(settings, "summary_cb_errors", 3):
+            if self._fail_count >= settings.summary_cb_errors:
                 import time
-                self._cooldown_until = time.time() + getattr(settings, "summary_cb_cooldown_sec", 60)
+                self._cooldown_until = time.time() + settings.summary_cb_cooldown_sec
             return "", []
+
 
     # ---------- NEW: full premium summary ----------
     async def summarize_full(
@@ -333,19 +345,22 @@ class Summarizer:
         title = (title or "").strip()
         text = (text or "").strip()
 
-        base = (text if len(text) > getattr(settings, "summary_lite_min_len", 120) else f"{title}\n{text}").strip()
+        base = (text if len(text) > settings.summary_lite_min_len else f"{title}\n{text}").strip()
         if not base:
             return "", []
 
-        # Try AI and return the result directly
+        # 1) اول تست Gemini
         tldr, bullets = await self._call_ai(title, base)
 
-        # Optional second attempt
+        # 2) اگر خالی بود، یک بار دیگر با درخواست ساده‌تر تست کن
         if not (tldr or bullets):
-            tldr, bullets = await self._call_ai(title, base + "\n(Please ensure at least 3 bullet points.)")
+            tldr, bullets = await self._call_ai(title, base + "\nSummarize clearly.")
 
-        # Return AI result or empty if both attempts fail
+        # 3) اگر هنوز خالی بود، برو روی Lite fallback
+        if not (tldr or bullets):
+            tldr, bullets = self._lite_summary(title, base)
+
         return tldr, bullets
-
+    
         # 3) Lite fallback (disabled)
         # return self._lite_summary(title, base)

@@ -17,7 +17,9 @@ from telegram.ext import (
 from ..utils.i18n import t, get_chat_lang
 from ..utils.text import ensure_scheme, canonicalize_url
 from app.config import settings  # تنظیمات برای Ephemeral و ...
-
+from . import basic
+from .lang import cmd_lang
+from .list import cmd_list
 # --- State(s) for /add conversation
 WAITING_FOR_URL = 1
 
@@ -143,6 +145,24 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await _maybe_auto_delete(context, chat_id, m.message_id)
     return ConversationHandler.END
 
+async def silent_cancel_and_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Exits the /add conversation silently and immediately
+    executes the new command entered by the user.
+    """
+    command = update.effective_message.text.split()[0] if update.effective_message.text else ""
+
+    if command == "/list":
+        await cmd_list(update, context)
+    elif command == "/remove":
+        await cmd_remove(update, context)        
+    elif command == "/lang":
+        await cmd_lang(update, context)
+    elif command == "/help":
+        await basic.cmd_help(update, context)
+    # اینجا می‌توانید دستورات دیگری که نیاز دارید را اضافه کنید
+
+    return ConversationHandler.END
 
 def get_add_conversation_handler() -> ConversationHandler:
     """
@@ -154,11 +174,13 @@ def get_add_conversation_handler() -> ConversationHandler:
         states={
             WAITING_FOR_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_site_url)],
         },
-        fallbacks=[CommandHandler("cancel", cmd_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", cmd_cancel),
+            MessageHandler(filters.COMMAND, silent_cancel_and_execute)
+        ],
         name="add_conv",
         persistent=False,
     )
-
 
 # ========== REMOVE (i18n + canonical + ephemeral) ==========
 async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
