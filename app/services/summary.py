@@ -241,8 +241,8 @@ class Summarizer:
     ) -> Tuple[str, List[str], List[str], List[str], str]:
         """
         خروجی پرمیوم: (tldr, bullets, opportunities, risks, signal)
-        - اگر مدل/کلید در دسترس نباشد یا خطا دهد → خروجی امن با فیلدهای خالی.
-        - زبان خروجی روی همهٔ فیلدها enforce می‌شود.
+        - بدون Fail Counter / Cooldown
+        - همیشه فقط AI
         """
         title = (title or "").strip()
         text = (text or "").strip()
@@ -251,10 +251,6 @@ class Summarizer:
             return "", [], [], [], ""
 
         if not (genai and self.api_key):
-            return "", [], [], [], ""
-
-        import time
-        if self._cooldown_until and time.time() < self._cooldown_until:
             return "", [], [], [], ""
 
         try:
@@ -269,7 +265,11 @@ class Summarizer:
 
             resp = await model.generate_content_async(prompt)
             raw = _strip_code_fences(getattr(resp, "text", "") or "")
-            data = json.loads(raw)
+            data = {}
+            try:
+                data = json.loads(raw)
+            except Exception:
+                data = {}
 
             # base fields
             tldr = (data.get("tldr") or "").strip()
@@ -297,17 +297,12 @@ class Summarizer:
                 tldr, bullets, opportunities, risks, signal, self.prompt_lang
             )
 
-            self._fail_count = 0
-            self._cooldown_until = None
             return tldr, bullets, opportunities, risks, signal
 
         except Exception:
-            self._fail_count += 1
-            if self._fail_count >= getattr(settings, "summary_cb_errors", 3):
-                import time
-                self._cooldown_until = time.time() + getattr(settings, "summary_cb_cooldown_sec", 60)
             # بازگشت امن با فیلدهای خالی
             return "", [], [], [], ""
+
 
     # ---------- Lite summary (kept disabled) ----------
     # def _lite_summary(self, title: str, text: str) -> Tuple[str, List[str]]:
