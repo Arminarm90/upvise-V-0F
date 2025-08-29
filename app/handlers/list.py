@@ -3,6 +3,7 @@
 from typing import List, Iterable, Any
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
+from telegram.error import BadRequest  # <-- NEW: برای مدیریت دقیق خطای ادیت پیام
 from app.utils.i18n import t, get_chat_lang
 
 PAGE_SIZE = 10
@@ -166,7 +167,20 @@ async def cb_list_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_id = getattr(edited, "message_id", None)
         if msg_id:
             await _maybe_auto_delete(context, chat_id, msg_id)
+    except BadRequest as e:  # <-- NEW: مدیریت خاص خطاهای ویرایش پیام
+        msg = str(e).lower()
+        if "message is not modified" in msg:
+            # هیچ تغییری لازم نبود؛ بی‌صدا خروج
+            return
+        # سایر خطاهای BadRequest: به پیام جدید fallback کن (رفتار قبلی)
+        sent = await q.message.reply_text(
+            text,
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        await _maybe_auto_delete(context, chat_id, sent.message_id)
     except Exception:
+        # هر خطای دیگر: همان fallback قبلی
         sent = await q.message.reply_text(
             text,
             reply_markup=kb,

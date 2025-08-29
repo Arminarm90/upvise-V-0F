@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 import re
 from bs4 import BeautifulSoup
 
@@ -19,8 +19,11 @@ except Exception:
         # fallback حداقلی (نباید رخ دهد)
         def t(key: str, lang: Optional[str] = None, **kwargs) -> str:  # type: ignore
             return {
-                "msg.source": "منبع",
-                "msg.untitled": "بدون عنوان",
+                "msg.source": "منبع" if (lang or "fa").startswith("fa") else "Source",
+                "msg.untitled": "بدون عنوان" if (lang or "fa").startswith("fa") else "Untitled",
+                "msg.opportunities": "فرصت‌ها" if (lang or "fa").startswith("fa") else "Opportunities",
+                "msg.risks": "ریسک‌ها" if (lang or "fa").startswith("fa") else "Risks",
+                "msg.signal": "سیگنال" if (lang or "fa").startswith("fa") else "Signal",
             }.get(key, key)
 
 try:
@@ -48,6 +51,12 @@ TEMPLATE_TITLE  = "<b>{title}</b>"
 TEMPLATE_META   = "<i>{source}</i> | <i>{date}</i>"
 TEMPLATE_LEAD   = "🔰 {lead}"
 TEMPLATE_BULLET = "✔️ {b}"
+
+# سکشن‌های 2x Premium (برچسب‌ها را از i18n می‌گیریم)
+TEMPLATE_HEAD_OPP    = "🔺 {label}"
+TEMPLATE_HEAD_RISK   = "🔻 {label}"
+TEMPLATE_HEAD_SIGNAL = "📊 {label}"
+TEMPLATE_SIGNAL_TEXT = "• {text}"  # سیگنال را به صورت یک خط ساده نمایش می‌دهیم
 
 
 # ==== کمکی‌ها ====
@@ -141,6 +150,86 @@ def _cap_bullets(bullets: List[str], cap: int) -> List[str]:
     return out
 
 
+def _cap_section(items: List[str], cap: int) -> List[str]:
+    """
+    تمیزسازی عمومی برای سکشن‌های فرصتها/ریسکها: مشابه بولت‌ها.
+    """
+    return _cap_bullets(items or [], cap)
+
+
+async def _summarize_flexible(
+    summarizer,
+    title: str,
+    text: str,
+    author: Optional[str],
+) -> Dict[str, Any]:
+    """
+    مسیر منعطف:
+      - اگر summarizer متدی به نام summarize_full داشته باشد: آن را صدا می‌زنیم.
+        * پشتیبانی از هر دو خروجی: tuple (tldr, bullets, opportunities, risks, signal) یا dict {...}.
+      - در غیر این صورت: summarize معمولی را صدا می‌زنیم و فقط tldr/bullets را پر می‌کنیم.
+    خروجی همیشه دیکشنری با کلیدهای: tldr, bullets, opportunities, risks, signal
+    """
+    result = {
+        "tldr": "",
+        "bullets": [],
+        "opportunities": [],
+        "risks": [],
+        "signal": "",
+    }
+    # تلاش برای API کامل (اختیاری)
+    try:
+        summarize_full = getattr(summarizer, "summarize_full", None)
+        if callable(summarize_full):
+            data = await summarize_full(title=title, text=text, author=author)
+            # --- NEW: پشتیبانی از tuple (نسخهٔ جدید summary.py) ---
+            if isinstance(data, (tuple, list)) and len(data) >= 5:
+                tldr, bullets, opportunities, risks, signal = data[:5]
+                result["tldr"] = (tldr or "").strip()
+                result["bullets"] = [x for x in (bullets or []) if isinstance(x, str)]
+                result["opportunities"] = [x for x in (opportunities or []) if isinstance(x, str)]
+                result["risks"] = [x for x in (risks or []) if isinstance(x, str)]
+                result["signal"] = (signal or "").strip()
+                return result
+            # --- حالت قدیمی: dict ---
+            if isinstance(data, dict):
+                result.update({k: data.get(k, result[k]) for k in result.keys()})
+                # اطمینان از تایپ‌ها
+                result["tldr"] = (result["tldr"] or "").strip()
+                result["bullets"] = [x for x in (result["bullets"] or []) if isinstance(x, str)]
+                result["opportunities"] = [x for x in (result["opportunities"] or []) if isinstance(x, str)]
+                result["risks"] = [x for x in (result["risks"] or []) if isinstance(x, str)]
+                result["signal"] = (result["signal"] or "").strip()
+                return result
+    except Exception:
+        # اگر API کامل خطا داد، بی‌سروصدا به مسیر ساده برگردیم
+        pass
+
+    # مسیر سازگار قبلی (دوخروجی)
+    tldr, bullets = await summarizer.summarize(title=title, text=text, author=author)
+    result["tldr"] = (tldr or "").strip()
+    result["bullets"] = [x for x in (bullets or []) if isinstance(x, str)]
+    return result
+
+
+def _maybe_section(parts: List[str], items: List[str], label: str, lang: str, cap: int) -> None:
+    """
+    در صورت وجود آیتم، سکشن را به parts اضافه می‌کند.
+    """
+    cleaned = _cap_section(items, cap)
+    if not cleaned:
+        return
+    # عنوان سکشن
+    parts.append(TEMPLATE_HEAD_OPP.format(label=esc(label)) if label == t("msg.opportunities", lang)
+                 else TEMPLATE_HEAD_RISK.format(label=esc(label)) if label == t("msg.risks", lang)
+                 else TEMPLATE_HEAD_SIGNAL.format(label=esc(label)))
+    # آیتم‌ها (برای سیگنال، یک خطه)
+    if label == t("msg.signal", lang):
+        parts.append(TEMPLATE_SIGNAL_TEXT.format(text=esc(cleaned[0])))
+    else:
+        parts.extend([TEMPLATE_BULLET.format(b=esc(b)) for b in cleaned])
+
+
 # ==== قالب‌ساز واحد: RSS Entry ====
 async def format_entry(
     feed_title: str,
@@ -156,6 +245,9 @@ async def format_entry(
 
       🔰 لید
       ✔️ بولت‌ها...
+      (🔺 فرصت‌ها…)
+      (🔻 ریسک‌ها…)
+      (📊 سیگنال…)
       منبع(لینک)
     """
     # زبان خلاصه: پارامتر → زبان پرامپت summarizer → پیش‌فرض fa
@@ -173,18 +265,27 @@ async def format_entry(
     if not raw:
         return None
 
-    # 3) خلاصه‌سازی (fa/en بر اساس lang)
+    # 3) خلاصه‌سازی منعطف (fa/en بر اساس lang)
     author = _author_of(entry) or None
-    tldr, bullets = await summarizer.summarize(title=title, text=raw, author=author)
+    data = await _summarize_flexible(summarizer, title=title, text=raw, author=author)
+    tldr = data.get("tldr") or ""
+    bullets = data.get("bullets") or []
+    opps = data.get("opportunities") or []
+    risks = data.get("risks") or []
+    signal = data.get("signal") or ""
+
     if not (tldr or bullets):
         return None
 
-    # 4) بولت‌ها با سقف
+    # 4) اِعمال سقف‌ها
     cap = int(getattr(settings, "summary_max_bullets", 4))
-    final_bullets = _cap_bullets(bullets or [], cap)
+    final_bullets = _cap_bullets(bullets, cap)
+    final_opps = _cap_section(opps, max(1, min(cap, 4)))
+    final_risks = _cap_section(risks, max(1, min(cap, 4)))
+    final_signal = (signal or "").strip()
 
     # 5) ساخت پیام نهایی (HTML تلگرام)
-    parts = [
+    parts: List[str] = [
         TEMPLATE_TITLE.format(title=esc(title)),
         meta_line,
         "",
@@ -194,13 +295,34 @@ async def format_entry(
     if final_bullets:
         parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_bullets]
 
+    # برچسب‌های i18n (fallback ملایم)
+    lbl_opp = t("msg.opportunities", lang)
+    lbl_risk = t("msg.risks", lang)
+    lbl_signal = t("msg.signal", lang)
+
+    # سکشن‌های 2x Premium
+    if final_opps:
+        parts.append("")
+        parts.append(TEMPLATE_HEAD_OPP.format(label=esc(lbl_opp)))
+        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_opps]
+
+    if final_risks:
+        parts.append("")
+        parts.append(TEMPLATE_HEAD_RISK.format(label=esc(lbl_risk)))
+        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_risks]
+
+    if final_signal:
+        parts.append("")
+        parts.append(TEMPLATE_HEAD_SIGNAL.format(label=esc(lbl_signal)))
+        parts.append(TEMPLATE_SIGNAL_TEXT.format(text=esc(final_signal)))
+
     if link:
         parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
 
     return "\n".join(parts).strip()
 
 
-# ==== قالب‌ساز واحد: Page‑Watch Article ====
+# ==== قالب‌ساز واحد: Page-Watch Article ====
 async def format_article(
     feed_title: str,
     title: str,
@@ -210,33 +332,45 @@ async def format_article(
     lang: Optional[str] = None,
 ) -> str | None:
     """
-    خروجی یکسان با RSS برای حالت Page‑Watch (بدون تاریخ):
+    خروجی یکسان با RSS برای حالت Page-Watch (بدون تاریخ):
       [عنوان]
       [منبع] | (تاریخ خالی)
 
       🔰 لید
       ✔️ بولت‌ها...
+      (🔺 فرصت‌ها…)
+      (🔻 ریسک‌ها…)
+      (📊 سیگنال…)
       منبع(لینک)
     """
     lang = (lang or getattr(summarizer, "prompt_lang", "fa") or "fa").lower()
 
     safe_title = _clean_html(title or "") or t("msg.untitled", lang)
     source_label = (feed_title or t("msg.source", lang)).strip()
-    date = ""  # در Page‑Watch معمولاً تاریخ RSS نداریم
+    date = ""  # در Page-Watch معمولاً تاریخ RSS نداریم
     meta_line = TEMPLATE_META.format(source=esc(source_label), date=esc(date))
 
     raw = (text or "").strip()
     if not raw:
         return None
 
-    tldr, bullets = await summarizer.summarize(title=safe_title, text=raw, author=None)
+    data = await _summarize_flexible(summarizer, title=safe_title, text=raw, author=None)
+    tldr = data.get("tldr") or ""
+    bullets = data.get("bullets") or []
+    opps = data.get("opportunities") or []
+    risks = data.get("risks") or []
+    signal = data.get("signal") or ""
+
     if not (tldr or bullets):
         return None
 
     cap = int(getattr(settings, "summary_max_bullets", 4))
-    final_bullets = _cap_bullets(bullets or [], cap)
+    final_bullets = _cap_bullets(bullets, cap)
+    final_opps = _cap_section(opps, max(1, min(cap, 4)))
+    final_risks = _cap_section(risks, max(1, min(cap, 4)))
+    final_signal = (signal or "").strip()
 
-    parts = [
+    parts: List[str] = [
         TEMPLATE_TITLE.format(title=esc(safe_title)),
         meta_line,
         "",
@@ -245,6 +379,25 @@ async def format_article(
     ]
     if final_bullets:
         parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_bullets]
+
+    lbl_opp = t("msg.opportunities", lang)
+    lbl_risk = t("msg.risks", lang)
+    lbl_signal = t("msg.signal", lang)
+
+    if final_opps:
+        parts.append("")
+        parts.append(TEMPLATE_HEAD_OPP.format(label=esc(lbl_opp)))
+        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_opps]
+
+    if final_risks:
+        parts.append("")
+        parts.append(TEMPLATE_HEAD_RISK.format(label=esc(lbl_risk)))
+        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_risks]
+
+    if final_signal:
+        parts.append("")
+        parts.append(TEMPLATE_HEAD_SIGNAL.format(label=esc(lbl_signal)))
+        parts.append(TEMPLATE_SIGNAL_TEXT.format(text=esc(final_signal)))
 
     if link:
         parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
