@@ -1,8 +1,8 @@
 {
   "menu.start": "Start",
-  "menu.add": "Add site",
-  "menu.list": "List feeds",
-  "menu.remove": "Remove link",
+  "menu.add": "Add a new source",
+  "menu.list": "List your sources",
+  "menu.remove": "Remove a source",
   "menu.lang": "Change language",
   "menu.help": "Help",
 
@@ -12,10 +12,10 @@
   "btn.next": "Next ▶️",
   "btn.close": "Close ✖️",
 
-  "start.hello": "Hi! I’m Upvise — your feed & page summarizer.\nPick a language so menus and summaries match it.",
-  "start.commands_hint": "Use the menu or commands below:",
+  "start.hello": "👋 Welcome to Xminit \nEvery link works. Even if it has no RSS. \n I will monitor it and deliver the latest articles and research on time summarized and reliable.",
+  "start.commands_hint": "⚡️ Start here",
 
-  "help.text": "I can watch RSS or site homepages, find fresh items, and send short summaries in English/Persian.\n\nCommands:\n/start — Start\n/add — Add site/feed\n/list — List sources\n/remove — Remove link\n/lang — Choose language\n/help — Help",
+  "help.text": "Don’t worry, I’m here to help you. \n Here’s what you can do with me: \n  • /add → Add a new source \n  • /list → See all your sources \n  • /remove → Remove a source \n  • /lang → Change language \n ❓ Common issues \n  • Nothing new? → The source may not have updated yet \n  • Source not working? → It may not have RSS, but I’ll still try to monitor it \n  • Wrong language? → Use /lang to switch \n Still stuck? You’re not alone. \n 📧 Email us: support@xminit.com",
 
   "lang.choose": "Choose the bot language:",
   "lang.set": "✅ Bot language switched to “${lang_name}”.",
@@ -25,7 +25,7 @@
   "list.empty": "No feeds added yet.",
   "list.page": "Page ${page}/${pages}",
 
-  "add.ask_site": "Send a site/feed link.",
+  "add.ask_site": "Please send the website link 🌐",
   "add.invalid_url": "❌ Not a valid URL. Try again.",
   "add.checking": "🔎 Checking the link…",
   "add.added_feed": "✅ Feed added.",
