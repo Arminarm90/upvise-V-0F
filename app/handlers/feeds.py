@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from urllib.parse import urlparse
 
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     MessageHandler,
     CommandHandler,
     filters,
+    CallbackQueryHandler
 )
 
 from ..utils.i18n import t, get_chat_lang
@@ -22,7 +23,7 @@ from .lang import cmd_lang
 from .list import cmd_list
 # --- State(s) for /add conversation
 WAITING_FOR_URL = 1
-
+WAITING_FOR_REMOVE_URL = 202
 
 def _is_probably_url(s: str) -> bool:
     try:
@@ -170,7 +171,10 @@ def get_add_conversation_handler() -> ConversationHandler:
         app.add_handler(get_add_conversation_handler())
     """
     return ConversationHandler(
-        entry_points=[CommandHandler("add", cmd_add)],
+        entry_points=[
+            CommandHandler("add", cmd_add),
+            CallbackQueryHandler(cmd_add, pattern=r"^list:add$")
+            ],
         states={
             WAITING_FOR_URL: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_site_url)],
         },
@@ -183,22 +187,31 @@ def get_add_conversation_handler() -> ConversationHandler:
     )
 
 # ========== REMOVE (i18n + canonical + ephemeral) ==========
-async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Entry point for /remove conversation.
+    Step 1: ask user to send a site URL (not RSS).
+    """
+    chat_id = update.effective_chat.id
+    lang = get_chat_lang(context.bot_data["store"], chat_id)
+
+    sent = await update.effective_message.reply_text(
+        t("remove.ask_site", lang) if t("remove.ask_site", lang) != "remove.ask_site"
+        else ("Send the site URL to remove:" if lang == "en" else "🔗 لینک سایت برای حذف بده:")
+    )
+    await _maybe_auto_delete(context, chat_id, sent.message_id)
+    return WAITING_FOR_REMOVE_URL
+
+
+async def handle_remove_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Step 2: user sends the URL → try to remove.
+    """
     store = context.bot_data["store"]
     chat_id = update.effective_chat.id
     lang = get_chat_lang(store, chat_id)
 
-    # پیام راهنما؛ اگر کلید i18n نبود، fallback هوشمند
-    usage = t("remove.usage", lang)
-    if usage == "remove.usage":
-        usage = "Usage: /remove <url>" if lang == "en" else "لینک بده: /remove <url>"
-
-    if not context.args:
-        sent = await update.message.reply_text(usage)
-        await _maybe_auto_delete(context, chat_id, sent.message_id)
-        return
-
-    url = _canon(context.args[0])
+    url = _canon(update.message.text.strip())
     try:
         ok = store.remove_feed(chat_id, url)
     except Exception:
@@ -212,10 +225,61 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     sent = await update.message.reply_text(text)
     await _maybe_auto_delete(context, chat_id, sent.message_id)
+    return ConversationHandler.END
+
+def get_remove_conversation_handler() -> ConversationHandler:
+    return ConversationHandler(
+        entry_points=[
+            CommandHandler("remove", cmd_remove),
+            CallbackQueryHandler(cmd_remove, pattern=r"^list:remove$"),
+            ],
+        states={
+            WAITING_FOR_REMOVE_URL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_remove_url),
+            ],
+        },
+        fallbacks=[
+            # هر کامند جدیدی بیاد → کانورسیشن تموم شه
+            MessageHandler(filters.COMMAND, silent_cancel_and_execute),
+        ],
+        allow_reentry=True,  # بذار دوباره بشه همون لحظه شروع کرد
+    )
+# async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE):
+#     store = context.bot_data["store"]
+#     chat_id = update.effective_chat.id
+#     lang = get_chat_lang(store, chat_id)
+
+#     # پیام راهنما؛ اگر کلید i18n نبود، fallback هوشمند
+#     usage = t("remove.usage", lang)
+#     if usage == "remove.usage":
+#         usage = "Usage: /remove <url>" if lang == "en" else "لینک بده: /remove <url>"
+
+#     if not context.args:
+#         sent = await update.message.reply_text(usage)
+#         await _maybe_auto_delete(context, chat_id, sent.message_id)
+#         return
+
+#     url = _canon(context.args[0])
+#     try:
+#         ok = store.remove_feed(chat_id, url)
+#     except Exception:
+#         ok = False
+
+#     if ok:
+#         text = t("sys.removed", lang)
+#     else:
+#         nf = t("remove.not_found", lang)
+#         text = nf if nf != "remove.not_found" else ("Not found." if lang == "en" else "❌ پیدا نشد.")
+
+#     sent = await update.message.reply_text(text)
+#     await _maybe_auto_delete(context, chat_id, sent.message_id)
 
 
 # ========== (اختیاری/غیرمصرفی) لیست ساده داخل این فایل ==========
 # /list اصلی در handlers/list.py پیاده‌سازی شده؛ این فقط برای سازگاری قدیمی است.
+# -------------------------
+# /list command
+# -------------------------
 async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     store = context.bot_data["store"]
     chat_id = update.effective_chat.id
@@ -229,5 +293,48 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     body = "\n".join(f"{i+1}. {u}" for i, u in enumerate(feeds))
     msg = f"{t('list.title', lang)}\n{body}"
-    sent = await update.message.reply_text(msg, parse_mode="HTML", disable_web_page_preview=True)
+
+    # دکمه‌ها با i18n
+    keyboard = [
+        [
+            InlineKeyboardButton(t("btn.add", lang), callback_data="list:add"),
+            InlineKeyboardButton(t("btn.remove", lang), callback_data="list:remove"),
+        ],
+        [
+            InlineKeyboardButton(t("btn.clear", lang), callback_data="list:clear"),
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    sent = await update.message.reply_text(
+        msg,
+        parse_mode="HTML",
+        disable_web_page_preview=True,
+        reply_markup=reply_markup
+    )
     await _maybe_auto_delete(context, chat_id, sent.message_id)
+
+
+# -------------------------
+# handle list buttons
+# -------------------------
+async def cb_list_actions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()  # جلوگیری از "Loading..."
+
+    data = query.data
+    chat_id = update.effective_chat.id
+    store = context.bot_data["store"]
+    lang = get_chat_lang(store, chat_id)
+
+    if data == "list:clear":
+        store.clear_feeds(chat_id)
+        await query.edit_message_text(t("list.cleared", lang))
+
+    elif data == "list:add":
+        # اینجا همون ConversationHandler مربوط به /add وارد میشه
+        return await cmd_add(update, context)
+
+    elif data == "list:remove":
+        # اینجا همون ConversationHandler مربوط به /remove وارد میشه
+        return await cmd_remove(update, context)

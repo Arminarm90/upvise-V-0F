@@ -35,6 +35,11 @@
   "add.error_generic": "⚠️ Unexpected error. Please try later.",
   "add.cancelled": "⛔️ Add flow cancelled.",
 
+  "list.cleared": "✅ All links have been removed.",
+  "btn.add": "➕ Add",
+  "btn.remove": "➖ Remove",
+  "btn.clear": "🗑 Clear List",
+
   "msg.source": "Source",
   "msg.untitled": "Untitled",
 

@@ -13,7 +13,7 @@ from .services.search import SearchService
 from .services.rss import RSSService
 
 from .handlers import basic, feeds  # /discover حذف شده است
-from .handlers.feeds import get_add_conversation_handler  # ConversationHandler برای /add
+from .handlers.feeds import get_add_conversation_handler, get_remove_conversation_handler, cb_list_actions, list_feeds  # ConversationHandler برای /add
 from .handlers.lang import cmd_lang, cb_lang
 from .handlers.list import cmd_list, cb_list_nav
 from .utils.i18n import load_locales, t
@@ -121,11 +121,12 @@ def build_app() -> Application:
     app.add_handler(get_add_conversation_handler())
 
     # /remove — تک‌مرحله‌ای
-    app.add_handler(CommandHandler("remove", feeds.cmd_remove))
+    app.add_handler(feeds.get_remove_conversation_handler())
+
 
     # /list + ناوبری صفحه‌بندی
-    app.add_handler(CommandHandler("list", cmd_list))
-    app.add_handler(CallbackQueryHandler(cb_list_nav, pattern=r"^list:"))
+    app.add_handler(CommandHandler("list", list_feeds))
+    app.add_handler(CallbackQueryHandler(cb_list_actions, pattern=r"^list:(add|remove|clear)$"))
 
     # /lang + تغییر زبان با دکمه‌ها
     app.add_handler(CommandHandler("lang", cmd_lang))

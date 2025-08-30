@@ -169,3 +169,17 @@ class StateStore:
     def iter_chats(self) -> List[Tuple[str, dict]]:
         """لیست (chat_id, state) برای همهٔ چت‌ها."""
         return list(self._state.items())
+
+    def clear_feeds(self, chat_id: int) -> None:
+        cid = str(chat_id)
+        st = self._state.get(cid, {})
+        if not st:
+            return False
+            
+        feeds = list(st.get("feeds", []) or [])
+        
+             
+        # ✅ تغییر اصلی: فقط فیلدهای مربوطه را به‌روزرسانی می‌کنیم.
+        st["feeds"] = []
+        self.save()
+        return True
