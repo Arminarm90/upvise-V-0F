@@ -8,7 +8,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 
 from .config import settings
 from .storage.state import StateStore
-from .services.summary import Summarizer
+from .services.summary import Summarizer, get_gemini_key
 from .services.search import SearchService
 from .services.rss import RSSService
 
@@ -88,7 +88,7 @@ def build_app() -> Application:
     # ---- سرویس‌ها
     store = StateStore(getattr(settings, "state_file", "subs.json"))
     summarizer = Summarizer(
-        api_key=getattr(settings, "gemini_key", None),
+        api_key=get_gemini_key(),
         prompt_lang=getattr(settings, "prompt_lang", "fa"),
     )
     search = SearchService(

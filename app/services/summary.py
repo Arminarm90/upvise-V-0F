@@ -188,7 +188,7 @@ class Summarizer:
     Summary chain with Gemini primary and Lite fallback.
     Guarantees (tldr, bullets). Enforces user language if possible.
     """
-
+    print("🔑 Gemini using key:", get_gemini_key())
     def __init__(self, api_key: Optional[str], prompt_lang: str = "fa"):
         self.api_key = api_key
         self.prompt_lang = (prompt_lang or "fa").lower()
@@ -202,9 +202,10 @@ class Summarizer:
         import time
         if self._cooldown_until and time.time() < self._cooldown_until:
             return "", []
-
         try:
-            genai.configure(api_key=get_gemini_key())
+            api_key = get_gemini_key()   # 👈 هر بار یه کلید جدید
+            print("🔑 Gemini using key:", api_key)
+            genai.configure(api_key=api_key)
             model = genai.GenerativeModel(settings.summary_model_name)
 
             prompt = (
@@ -266,7 +267,9 @@ class Summarizer:
             return "", [], [], [], ""
 
         try:
-            genai.configure(api_key=get_gemini_key())
+            api_key = get_gemini_key()   # 👈 هر بار یه کلید جدید
+            print("🔑 Gemini using key:", api_key)
+            genai.configure(api_key=api_key)
             model = genai.GenerativeModel(settings.summary_model_name)
 
             prompt = (
