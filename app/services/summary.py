@@ -204,7 +204,7 @@ class Summarizer:
             return "", []
         try:
             api_key = get_gemini_key()   # 👈 هر بار یه کلید جدید
-            print("🔑 Gemini using key:", api_key)
+            print("🔑 Gemini using key======", api_key)
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(settings.summary_model_name)
 
@@ -268,7 +268,7 @@ class Summarizer:
 
         try:
             api_key = get_gemini_key()   # 👈 هر بار یه کلید جدید
-            print("🔑 Gemini using key:", api_key)
+            print("🔑 Gemini using key=====", api_key)
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(settings.summary_model_name)
 
