@@ -12,7 +12,6 @@ import httpx
 import feedparser
 from bs4 import BeautifulSoup
 from telegram.ext import Application
-from telegram.error import BadRequest, Forbidden  # <-- NEW: برای مدیریت دقیق خطاهای ارسال
 
 from ..utils.text import ensure_scheme, root_url
 from .summary import Summarizer
@@ -38,7 +37,7 @@ except Exception:
         fetcher_ua = ua
     settings = _S()  # type: ignore
 
-# واکشی متن مقاله برای Page-Watch
+# واکشی متن مقاله برای Page‑Watch
 try:
     from ..services.fetcher import fetch_article_text
 except Exception:
@@ -50,7 +49,7 @@ LOG = logging.getLogger("rss")
 
 class RSSService:
     """
-    سرویس پایش RSS و Page-Watch (نسخه‌ی یکپارچه با خلاصه‌سازی)
+    سرویس پایش RSS و Page‑Watch (نسخه‌ی یکپارچه با خلاصه‌سازی)
     - اگر URL ذخیره‌شده یک فید معتبر باشد → با feedparser خوانده می‌شود و خلاصه ارسال می‌گردد.
     - اگر فید معتبر نباشد → صفحه‌ی خانه/لیست بررسی می‌شود، لینک‌های مقاله پیدا و خلاصه می‌شوند.
     """
@@ -212,7 +211,7 @@ class RSSService:
         )
 
     # ------------------------------------------------------------------ #
-    # Page-Watch helpers
+    # Page‑Watch helpers
     # ------------------------------------------------------------------ #
     def _extract_listing_links(self, page_url: str, html: str, limit: int = 30) -> List[str]:
         """
@@ -299,11 +298,7 @@ class RSSService:
                 chat_lang = "fa"
 
             feeds: Iterable[str] = list(st.get("feeds", []))
-            chat_invalid = False  # <-- NEW: اگر چت نامعتبر/بلاک بود، در همین چرخه توقف ارسال
             for url in feeds:
-                if chat_invalid:
-                    break
-
                 url = ensure_scheme(url)
                 try:
                     # مسیر RSS
@@ -321,8 +316,6 @@ class RSSService:
                         feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
 
                         for eid, e in reversed(new_entries):
-                            if chat_invalid:
-                                break
                             html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
                             if not html or not str(html).strip():
                                 reason = "ai_empty_output"
@@ -330,42 +323,19 @@ class RSSService:
                                 self.stats["skipped"] += 1
                                 continue
 
-                            try:
-                                await app.bot.send_message(
-                                    chat_id=cid_int,
-                                    text=html,
-                                    parse_mode="HTML",
-                                    disable_web_page_preview=True,
-                                )
-                                self.stats["sent"] += 1
-                                seen.add(eid)
-                            except BadRequest as e:
-                                msg = str(e).lower()
-                                if "chat not found" in msg:
-                                    # چت نامعتبر → ارسال‌های بعدی را در این چرخه متوقف کن
-                                    LOG.warning("Chat not found (cid=%s). Skipping further sends for this chat.", cid_int)
-                                    self.stats["reasons"]["chat_not_found"] = self.stats["reasons"].get("chat_not_found", 0) + 1
-                                    chat_invalid = True
-                                    break
-                                if "message is not modified" in msg:
-                                    LOG.debug("Ignored: message is not modified (cid=%s)", cid_int)
-                                else:
-                                    LOG.debug("BadRequest on send_message (cid=%s): %s", cid_int, e, exc_info=True)
-                            except Forbidden as e:
-                                # ربات بلاک شده توسط کاربر
-                                LOG.warning("Bot blocked by user (cid=%s). Skipping further sends for this chat.", cid_int)
-                                self.stats["reasons"]["bot_blocked"] = self.stats["reasons"].get("bot_blocked", 0) + 1
-                                chat_invalid = True
-                                break
-                            except Exception:
-                                LOG.debug("send_message failed for feed entry (cid=%s)", cid_int, exc_info=True)
+                            await app.bot.send_message(
+                                chat_id=cid_int,
+                                text=html,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                            self.stats["sent"] += 1
+                            seen.add(eid)
 
                         self.store.set_seen(cid_int, url, seen)
-                        if chat_invalid:
-                            break
                         continue  # RSS مسیر کامل شد؛ به URL بعدی برو
 
-                    # --- مسیر Page-Watch (خلاصه‌ساز یکپارچه) ---
+                    # --- مسیر Page‑Watch (خلاصه‌ساز یکپارچه) ---
                     page_html = await self._get_html(url)
                     if not page_html:
                         continue
@@ -383,8 +353,6 @@ class RSSService:
 
                     feed_title = urlparse(url).netloc or url
                     for link in reversed(new_links):
-                        if chat_invalid:
-                            break
                         # برای عنوان و متن مقاله
                         title_html = await self._get_html(link)
                         title = self._page_title(title_html, fallback=urlparse(link).path or link)
@@ -426,24 +394,8 @@ class RSSService:
                             )
                             self.stats["sent"] += 1
                             seen.add(link)
-                        except BadRequest as e:
-                            msg = str(e).lower()
-                            if "chat not found" in msg:
-                                LOG.warning("Chat not found (cid=%s). Skipping further sends for this chat.", cid_int)
-                                self.stats["reasons"]["chat_not_found"] = self.stats["reasons"].get("chat_not_found", 0) + 1
-                                chat_invalid = True
-                                break
-                            if "message is not modified" in msg:
-                                LOG.debug("Ignored: message is not modified (cid=%s)", cid_int)
-                            else:
-                                LOG.debug("BadRequest on send_message (cid=%s): %s", cid_int, e, exc_info=True)
-                        except Forbidden as e:
-                            LOG.warning("Bot blocked by user (cid=%s). Skipping further sends for this chat.", cid_int)
-                            self.stats["reasons"]["bot_blocked"] = self.stats["reasons"].get("bot_blocked", 0) + 1
-                            chat_invalid = True
-                            break
                         except Exception:
-                            LOG.debug("send_message failed for %s (cid=%s)", link, cid_int, exc_info=True)
+                            LOG.debug("send_message failed for %s", link, exc_info=True)
 
                     self.store.set_seen(cid_int, url, seen)
 

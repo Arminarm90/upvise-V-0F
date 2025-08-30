@@ -36,7 +36,7 @@ def _get_list(name: str, default: list[str]) -> list[str]:
 class Settings:
     # --- Bot / Core ---
     telegram_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-    gemini_key: str = os.getenv("GEMINI_API_KEY", "").strip()
+    gemini_keys: list[str] = field(default_factory=lambda: _get_list("GEMINI_API_KEYS", []))
     serper_key: str = os.getenv("SERPER_API_KEY", "").strip()
 
     search_lang: str = (os.getenv("SEARCH_DEFAULT_LANG", "fa") or "fa").lower()

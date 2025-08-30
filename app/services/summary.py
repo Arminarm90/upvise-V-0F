@@ -170,6 +170,18 @@ def _extract_json(raw: str) -> str:
         return cleaned[start:end+1]
     return cleaned
 
+# Get API Key
+import itertools
+
+# Round-Robin بجای random
+_key_cycle = None
+def get_gemini_key() -> str:
+    global _key_cycle
+    if not settings.gemini_keys:
+        return ""
+    if _key_cycle is None:
+        _key_cycle = itertools.cycle(settings.gemini_keys)
+    return next(_key_cycle)
 
 class Summarizer:
     """
@@ -192,7 +204,7 @@ class Summarizer:
             return "", []
 
         try:
-            genai.configure(api_key=self.api_key)
+            genai.configure(api_key=get_gemini_key())
             model = genai.GenerativeModel(settings.summary_model_name)
 
             prompt = (
@@ -254,7 +266,7 @@ class Summarizer:
             return "", [], [], [], ""
 
         try:
-            genai.configure(api_key=self.api_key)
+            genai.configure(api_key=get_gemini_key())
             model = genai.GenerativeModel(settings.summary_model_name)
 
             prompt = (
