@@ -79,7 +79,7 @@ class StateStore:
         if cid not in self._state:
             self._state[cid] = {
                 "name": name,
-                "lang": "fa", 
+                "lang": "en", 
                 "feeds": [],
                 "seen": {}
             }

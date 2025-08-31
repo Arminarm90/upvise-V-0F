@@ -17,15 +17,15 @@ _LOCALES: Dict[str, Dict] = {}
 try:
     from app.config import settings  # type: ignore
     _DEFAULT_LOCALES_DIR = getattr(settings, "locales_dir", "app/i18n")
-    _DEFAULT_LANG = (getattr(settings, "prompt_lang", "fa") or "fa")
+    _DEFAULT_LANG = (getattr(settings, "prompt_lang", "en") or "en")
 except Exception:
     _DEFAULT_LOCALES_DIR = "app/i18n"
-    _DEFAULT_LANG = "fa"
+    _DEFAULT_LANG = "en"
 
 
 def _norm_lang(code: Optional[str]) -> str:
     """نرمال‌سازی کد زبان."""
-    code = (code or _DEFAULT_LANG or "fa").strip().lower()
+    code = (code or _DEFAULT_LANG or "en").strip().lower()
     if "-" in code:
         code = code.split("-", 1)[0]
     return code
