@@ -7,11 +7,15 @@ import logging
 import time
 from typing import Iterable, List, Tuple, Optional
 from urllib.parse import urljoin, urlparse
-
+from urllib.parse import urlparse, parse_qs, quote
+from datetime import datetime, timezone
+from persiantools.jdatetime import JalaliDateTime
+import humanize
 import httpx
 import feedparser
 from bs4 import BeautifulSoup
 from telegram.ext import Application
+from urllib.parse import quote
 
 from ..utils.text import ensure_scheme, root_url
 from .summary import Summarizer
@@ -19,6 +23,8 @@ from ..storage.state import StateStore
 from ..utils.message_formatter import format_entry, format_article
 from ..utils.i18n import get_chat_lang
 
+# sites 
+from sites import google_trends
 # تنظیمات پروژه (fallback امن اگر کلیدها وجود نداشتند)
 try:
     from app.config import settings  # type: ignore
@@ -44,6 +50,10 @@ except Exception:
     async def fetch_article_text(url: str, timeout: int = 12) -> str:  # type: ignore
         return ""
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s:%(name)s:%(message)s",
+)
 LOG = logging.getLogger("rss")
 
 
@@ -278,6 +288,7 @@ class RSSService:
     # Main poll
     # ------------------------------------------------------------------ #
     async def poll_once(self, app: Application):
+        reporter = app.bot_data.get("reporter")
         for cid, st in self.store.iter_chats():
             try:
                 cid_int = int(cid)
@@ -303,18 +314,32 @@ class RSSService:
                 try:
                     # مسیر RSS
                     f = await self._fetch_feed(url)
+                    if "trends.google.com/trending/rss" in url:
+                        html = await google_trends.process_google_trends(f, self.store, cid_int, url)
+                        if html:
+                            await app.bot.send_message(
+                                chat_id=cid_int,
+                                text=html,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                        continue
+
                     if f and getattr(f, "entries", None):
                         seen = set(self.store.get_seen(cid_int, url))
                         new_entries = []
                         cap = int(getattr(settings, "rss_max_items_per_feed", 10))
                         for e in f.entries[:cap]:
-                            eid = self.entry_id(e)
+                            if "trends.google.com" in url:
+                                eid = f"trend:{getattr(e, 'title', '').strip()}"
+                            else:
+                                eid = self.entry_id(e)                            
                             if not eid or eid in seen:
                                 continue
                             new_entries.append((eid, e))
 
                         feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
-
+                        html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
                         for eid, e in reversed(new_entries):
                             html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
                             if not html or not str(html).strip():
@@ -383,8 +408,6 @@ class RSSService:
                             reason = "article_empty_output"
                             self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
                             self.stats["skipped"] += 1
-                            continue
-
                         try:
                             await app.bot.send_message(
                                 chat_id=cid_int,
