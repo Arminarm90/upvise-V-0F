@@ -16,6 +16,7 @@ import feedparser
 from bs4 import BeautifulSoup
 from telegram.ext import Application
 from urllib.parse import quote
+import random
 
 from ..utils.text import ensure_scheme, root_url
 from .summary import Summarizer
@@ -309,6 +310,8 @@ class RSSService:
                 chat_lang = "fa"
 
             feeds: Iterable[str] = list(st.get("feeds", []))
+            random.shuffle(feeds)   # ✅ ترتیب فیدها هر بار رندوم میشه
+
             for url in feeds:
                 url = ensure_scheme(url)
                 try:
