@@ -71,7 +71,8 @@ class RSSService:
         self.search = search_service
         self.poll_sec = poll_sec
         self.stats = {"sent": 0, "skipped": 0, "reasons": {}}
-
+         # نگهداری ایندکس (cursor) برای هر چت در runtime
+        self._cursor_per_chat: dict[int, int] = {}
     # ------------------------------------------------------------------ #
     # Feeds
     # ------------------------------------------------------------------ #
@@ -285,11 +286,229 @@ class RSSService:
             pass
         return fallback
 
+    async def _process_feed(self, app: Application, cid_int: int, url: str, f, chat_lang: str, reporter):
+        """
+        پردازش یک فید (فید از قبل با _fetch_feed گرفته شده و پارس شده).
+        این تابع مسئول ارسال پیام‌ها، آپدیت seen و reporter/stat است.
+        """
+        try:
+            # special-case Google Trends: اگر ماژول سایت دارید از آن استفاده کن
+            if "trends.google.com/trending/rss" in url:
+                # google_trends.process_google_trends باید یک HTML آماده/پیغام برگرداند
+                html = await google_trends.process_google_trends(f, self.store, cid_int, url)
+                if html:
+                    await app.bot.send_message(chat_id=cid_int, text=html, parse_mode="HTML", disable_web_page_preview=True)
+                    self.stats["sent"] += 1
+                    if reporter:
+                        try: reporter.record(url, "sent")
+                        except Exception: pass
+                return
+
+            # معمولی: بررسی ورودی‌ها و ارسال پیام‌ها
+            seen = set(self.store.get_seen(cid_int, url))
+            cap = int(getattr(settings, "rss_max_items_per_feed", 10))
+            new_entries = []
+            for e in (getattr(f, "entries", []) or [])[:cap]:
+                # شناسهٔ entry
+                eid = self.entry_id(e) if "trends.google.com" not in url else f"trend:{(getattr(e,'title','') or '').strip()}"
+                if not eid or eid in seen:
+                    continue
+                new_entries.append((eid, e))
+
+            feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
+
+            # پردازش هر entry (همان منطق سابق، با reporter-safe)
+            for eid, e in reversed(new_entries):
+                html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
+                if not html or not str(html).strip():
+                    # اگر خلاصه‌ساز چیزی نداد، علامت بزن و ادامه بده
+                    reason = "ai_empty_output"
+                    self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
+                    self.stats["skipped"] += 1
+                    if reporter:
+                        try: reporter.record(url, "skipped", reason)
+                        except Exception: pass
+                    continue
+
+                # ارسال پیام
+                try:
+                    await app.bot.send_message(chat_id=cid_int, text=html, parse_mode="HTML", disable_web_page_preview=True)
+                    self.stats["sent"] += 1
+                    seen.add(eid)
+                    if reporter:
+                        try: reporter.record(url, "sent")
+                        except Exception: pass
+                except Exception:
+                    LOG.debug("send_message failed for %s (cid=%s)", url, cid_int, exc_info=True)
+
+            # ذخیره seen برای این چت و فید
+            self.store.set_seen(cid_int, url, seen)
+
+        except Exception as ex:
+            LOG.exception("process_feed error for %s (cid=%s): %s", url, cid_int, ex)
+
     # ------------------------------------------------------------------ #
     # Main poll
     # ------------------------------------------------------------------ #
+    # async def poll_once(self, app: Application):
+    #     self.stats = {"sent": 0, "skipped": 0, "reasons": {}}
+
+    #     reporter = app.bot_data.get("reporter")
+    #     for cid, st in self.store.iter_chats():
+    #         try:
+    #             cid_int = int(cid)
+    #         except Exception:
+    #             try:
+    #                 cid_int = int(st.get("chat_id") or 0)
+    #             except Exception:
+    #                 continue
+
+    #         # زبان چت و تنظیم برای Summarizer
+    #         try:
+    #             chat_lang = get_chat_lang(self.store, cid_int)
+    #             try:
+    #                 self.summarizer.prompt_lang = chat_lang
+    #             except Exception:
+    #                 pass
+    #         except Exception:
+    #             chat_lang = "fa"
+
+    #         feeds: Iterable[str] = list(st.get("feeds", []))
+    #         random.shuffle(feeds)   # ✅ ترتیب فیدها هر بار رندوم میشه
+
+    #         for url in feeds:
+    #             print("💣this is the target ====",url)
+    #             url = ensure_scheme(url)
+    #             try:
+    #                 # مسیر RSS
+    #                 f = await self._fetch_feed(url)
+    #                 if "trends.google.com/trending/rss" in url:
+    #                     html = await google_trends.process_google_trends(f, self.store, cid_int, url)
+    #                     if html:
+    #                         await app.bot.send_message(
+    #                             chat_id=cid_int,
+    #                             text=html,
+    #                             parse_mode="HTML",
+    #                             disable_web_page_preview=True,
+    #                         )
+    #                     continue
+
+    #                 if f and getattr(f, "entries", None):
+    #                     seen = set(self.store.get_seen(cid_int, url))
+    #                     new_entries = []
+    #                     cap = int(getattr(settings, "rss_max_items_per_feed", 10))
+    #                     for e in f.entries[:cap]:
+    #                         if "trends.google.com" in url:
+    #                             eid = f"trend:{getattr(e, 'title', '').strip()}"
+    #                         else:
+    #                             eid = self.entry_id(e)                            
+    #                         if not eid or eid in seen:
+    #                             continue
+    #                         new_entries.append((eid, e))
+
+    #                     feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
+    #                     for eid, e in reversed(new_entries):
+    #                         html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
+    #                         if not html or not str(html).strip():
+    #                             reason = "ai_empty_output"
+    #                             self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
+    #                             self.stats["skipped"] += 1
+    #                             continue
+
+    #                         await app.bot.send_message(
+    #                             chat_id=cid_int,
+    #                             text=html,
+    #                             parse_mode="HTML",
+    #                             disable_web_page_preview=True,
+    #                         )
+    #                         self.stats["sent"] += 1
+    #                         seen.add(eid)
+
+    #                     self.store.set_seen(cid_int, url, seen)
+    #                     continue  # RSS مسیر کامل شد؛ به URL بعدی برو
+
+    #                 # --- مسیر Page‑Watch (خلاصه‌ساز یکپارچه) ---
+    #                 page_html = await self._get_html(url)
+    #                 if not page_html:
+    #                     continue
+
+    #                 listing_limit = int(getattr(settings, "pagewatch_listing_limit", 30))
+    #                 links = self._extract_listing_links(url, page_html, limit=listing_limit)
+    #                 if not links:
+    #                     continue
+
+    #                 seen = set(self.store.get_seen(cid_int, url))
+    #                 per_cycle = int(getattr(settings, "pagewatch_links_per_cycle", 3))
+    #                 new_links = [u for u in links if u not in seen][:per_cycle]
+    #                 if not new_links:
+    #                     continue
+
+    #                 feed_title = urlparse(url).netloc or url
+    #                 for link in reversed(new_links):
+    #                     # برای عنوان و متن مقاله
+    #                     title_html = await self._get_html(link)
+    #                     title = self._page_title(title_html, fallback=urlparse(link).path or link)
+
+    #                     # متن مقاله: اول از fetcher (تمیز و آماده‌ی خلاصه‌سازی)
+    #                     article_text = await fetch_article_text(
+    #                         link, timeout=int(getattr(settings, "fetcher_timeout", 12))
+    #                     )
+    #                     if not article_text:
+    #                         # اگر نشد، حداقل متن خام صفحه را به Summarizer بدهیم تا Lite بسازد
+    #                         try:
+    #                             soup = BeautifulSoup(title_html or "", "html.parser")
+    #                             for tnode in soup(["script", "style", "noscript"]):
+    #                                 tnode.decompose()
+    #                             article_text = (soup.get_text(" ", strip=True) or title).strip()
+    #                         except Exception:
+    #                             article_text = title or link
+
+    #                     html = await format_article(
+    #                         feed_title=feed_title,
+    #                         title=title,
+    #                         link=link,
+    #                         text=article_text,
+    #                         summarizer=self.summarizer,
+    #                         lang=chat_lang,
+    #                     )
+    #                     if not html or not str(html).strip():
+    #                         reason = "article_empty_output"
+    #                         self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
+    #                         self.stats["skipped"] += 1
+    #                     try:
+    #                         await app.bot.send_message(
+    #                             chat_id=cid_int,
+    #                             text=html,
+    #                             parse_mode="HTML",
+    #                             disable_web_page_preview=True,
+    #                         )
+    #                         self.stats["sent"] += 1
+    #                         seen.add(link)
+    #                     except Exception:
+    #                         LOG.debug("send_message failed for %s", link, exc_info=True)
+
+    #                 self.store.set_seen(cid_int, url, seen)
+
+    #             except Exception as ex:
+    #                 LOG.exception("poll_once error for %s: %s", url, ex)
+
+    #     # ---- لاگ آمار یک‌بار در انتهای poll_once
+    #     total = self.stats["sent"] + self.stats["skipped"]
+    #     if total:
+    #         ratio = round(100 * self.stats["skipped"] / total, 1)
+    #         LOG.info(
+    #             "[SUMMARY][STATS] sent=%d skipped=%d (%.1f%%) reasons=%s",
+    #             self.stats["sent"],
+    #             self.stats["skipped"],
+    #             ratio,
+    #             self.stats["reasons"],
+    #         )
+
     async def poll_once(self, app: Application):
         reporter = app.bot_data.get("reporter")
+        # reset stats for this run (اختیاری ولی مفید برای گزارش)
+        self.stats = {"sent": 0, "skipped": 0, "reasons": {}}
+
         for cid, st in self.store.iter_chats():
             try:
                 cid_int = int(cid)
@@ -299,7 +518,7 @@ class RSSService:
                 except Exception:
                     continue
 
-            # زبان چت و تنظیم برای Summarizer
+            # زبان چت
             try:
                 chat_lang = get_chat_lang(self.store, cid_int)
                 try:
@@ -309,134 +528,59 @@ class RSSService:
             except Exception:
                 chat_lang = "fa"
 
-            feeds: Iterable[str] = list(st.get("feeds", []))
-            random.shuffle(feeds)   # ✅ ترتیب فیدها هر بار رندوم میشه
+            feeds: list[str] = list(st.get("feeds", []))
+            if not feeds:
+                continue
 
-            for url in feeds:
-                print("💣this is the target ====",url)
-                url = ensure_scheme(url)
-                try:
-                    # مسیر RSS
-                    f = await self._fetch_feed(url)
-                    if "trends.google.com/trending/rss" in url:
-                        html = await google_trends.process_google_trends(f, self.store, cid_int, url)
-                        if html:
-                            await app.bot.send_message(
-                                chat_id=cid_int,
-                                text=html,
-                                parse_mode="HTML",
-                                disable_web_page_preview=True,
-                            )
-                        continue
+            # shuffle order to avoid bias toward some feeds
+            random.shuffle(feeds)
 
-                    if f and getattr(f, "entries", None):
-                        seen = set(self.store.get_seen(cid_int, url))
-                        new_entries = []
-                        cap = int(getattr(settings, "rss_max_items_per_feed", 10))
-                        for e in f.entries[:cap]:
-                            if "trends.google.com" in url:
-                                eid = f"trend:{getattr(e, 'title', '').strip()}"
-                            else:
-                                eid = self.entry_id(e)                            
-                            if not eid or eid in seen:
-                                continue
-                            new_entries.append((eid, e))
+            # batch cursor (in-memory). اگر بخوای persistent کن می‌تونی اینو در StateStore ذخیره کنی.
+            start = self._cursor_per_chat.get(cid_int, 0)
+            batch_size = int(getattr(settings, "rss_batch_size", 20))
+            if start >= len(feeds):
+                start = 0
+            end = min(len(feeds), start + batch_size)
+            batch = feeds[start:end]
+            next_index = end if end < len(feeds) else 0
+            self._cursor_per_chat[cid_int] = next_index
 
-                        feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
-                        html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
-                        for eid, e in reversed(new_entries):
-                            html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
-                            if not html or not str(html).strip():
-                                reason = "ai_empty_output"
-                                self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
-                                self.stats["skipped"] += 1
-                                continue
+            LOG.info("Polling chat=%s feeds_total=%d batch=%d (start=%d next=%d)",
+                     cid_int, len(feeds), len(batch), start, next_index)
 
-                            await app.bot.send_message(
-                                chat_id=cid_int,
-                                text=html,
-                                parse_mode="HTML",
-                                disable_web_page_preview=True,
-                            )
-                            self.stats["sent"] += 1
-                            seen.add(eid)
+            # concurrency limiter برای fetch ها
+            concurrency = int(getattr(settings, "rss_fetch_concurrency", 6))
+            sem = asyncio.Semaphore(concurrency)
 
-                        self.store.set_seen(cid_int, url, seen)
-                        continue  # RSS مسیر کامل شد؛ به URL بعدی برو
+            async def _fetch_with_sem(u):
+                async with sem:
+                    try:
+                        return await self._fetch_feed(u)
+                    except Exception as ex:
+                        LOG.debug("fetch failed for %s: %s", u, ex)
+                        return None
 
-                    # --- مسیر Page‑Watch (خلاصه‌ساز یکپارچه) ---
-                    page_html = await self._get_html(url)
-                    if not page_html:
-                        continue
+            # fetch همهٔ فیدهای batch به صورت concurrency-limited
+            fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in batch]
+            results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
-                    listing_limit = int(getattr(settings, "pagewatch_listing_limit", 30))
-                    links = self._extract_listing_links(url, page_html, limit=listing_limit)
-                    if not links:
-                        continue
+            # برای هر فید که با موفقیت گرفته شده، یک task پردازش ایجاد کن
+            proc_tasks = []
+            for url, res in zip(batch, results):
+                if isinstance(res, Exception) or not res:
+                    LOG.debug("No feed parsed for %s (chat=%s): %s", url, cid_int, res)
+                    # می‌تونی اینجا reporter.record(url,'skipped', 'fetch_failed') بزنی اگر خواستی
+                    continue
+                # پردازش را موازی اجرا کن (هر پردازش خودش ارسال را انجام می‌دهد)
+                proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, res, chat_lang, reporter)))
 
-                    seen = set(self.store.get_seen(cid_int, url))
-                    per_cycle = int(getattr(settings, "pagewatch_links_per_cycle", 3))
-                    new_links = [u for u in links if u not in seen][:per_cycle]
-                    if not new_links:
-                        continue
+            # منتظر بمون که همه پردازش‌ها تموم بشن (اگر proc_tasks خالی بود همین خط سریع رد میشه)
+            if proc_tasks:
+                await asyncio.gather(*proc_tasks, return_exceptions=True)
 
-                    feed_title = urlparse(url).netloc or url
-                    for link in reversed(new_links):
-                        # برای عنوان و متن مقاله
-                        title_html = await self._get_html(link)
-                        title = self._page_title(title_html, fallback=urlparse(link).path or link)
-
-                        # متن مقاله: اول از fetcher (تمیز و آماده‌ی خلاصه‌سازی)
-                        article_text = await fetch_article_text(
-                            link, timeout=int(getattr(settings, "fetcher_timeout", 12))
-                        )
-                        if not article_text:
-                            # اگر نشد، حداقل متن خام صفحه را به Summarizer بدهیم تا Lite بسازد
-                            try:
-                                soup = BeautifulSoup(title_html or "", "html.parser")
-                                for tnode in soup(["script", "style", "noscript"]):
-                                    tnode.decompose()
-                                article_text = (soup.get_text(" ", strip=True) or title).strip()
-                            except Exception:
-                                article_text = title or link
-
-                        html = await format_article(
-                            feed_title=feed_title,
-                            title=title,
-                            link=link,
-                            text=article_text,
-                            summarizer=self.summarizer,
-                            lang=chat_lang,
-                        )
-                        if not html or not str(html).strip():
-                            reason = "article_empty_output"
-                            self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
-                            self.stats["skipped"] += 1
-                        try:
-                            await app.bot.send_message(
-                                chat_id=cid_int,
-                                text=html,
-                                parse_mode="HTML",
-                                disable_web_page_preview=True,
-                            )
-                            self.stats["sent"] += 1
-                            seen.add(link)
-                        except Exception:
-                            LOG.debug("send_message failed for %s", link, exc_info=True)
-
-                    self.store.set_seen(cid_int, url, seen)
-
-                except Exception as ex:
-                    LOG.exception("poll_once error for %s: %s", url, ex)
-
-        # ---- لاگ آمار یک‌بار در انتهای poll_once
+        # لاگ کلی آمار
         total = self.stats["sent"] + self.stats["skipped"]
         if total:
             ratio = round(100 * self.stats["skipped"] / total, 1)
-            LOG.info(
-                "[SUMMARY][STATS] sent=%d skipped=%d (%.1f%%) reasons=%s",
-                self.stats["sent"],
-                self.stats["skipped"],
-                ratio,
-                self.stats["reasons"],
-            )
+            LOG.info("[SUMMARY][STATS] sent=%d skipped=%d (%.1f%%) reasons=%s",
+                     self.stats["sent"], self.stats["skipped"], ratio, self.stats["reasons"])

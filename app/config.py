@@ -93,6 +93,8 @@ class Settings:
         "(KHTML, like Gecko) Chrome/125 Safari/537.36",
     )
     rss_max_items_per_feed: int = _get_int("RSS_MAX_ITEMS_PER_FEED", 10)
+    rss_batch_size: int = _get_int("RSS_BATCH_SIZE", 20)             # چند فید در هر poll
+    rss_fetch_concurrency: int = _get_int("RSS_FETCH_CONCURRENCY", 6) # concurrency برای fetch
 
     # --- UA جنریک ---
     ua: str = os.getenv("UA", "").strip()
