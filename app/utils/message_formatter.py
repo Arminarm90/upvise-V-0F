@@ -275,7 +275,14 @@ async def format_entry(
     signal = data.get("signal") or ""
 
     if not (tldr or bullets):
-        return None
+        parts = [
+            TEMPLATE_TITLE.format(title=esc(title)),
+            meta_line,
+        ]
+        if link:
+            parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
+        return "\n".join(parts).strip()
+
 
     # 4) اِعمال سقف‌ها
     cap = int(getattr(settings, "summary_max_bullets", 4))
@@ -362,7 +369,14 @@ async def format_article(
     signal = data.get("signal") or ""
 
     if not (tldr or bullets):
-        return None
+        # فقط عنوان + لینک
+        parts = [
+            TEMPLATE_TITLE.format(title=esc(title)),
+            meta_line,
+        ]
+        if link:
+            parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
+        return "\n".join(parts).strip()
 
     cap = int(getattr(settings, "summary_max_bullets", 4))
     final_bullets = _cap_bullets(bullets, cap)
