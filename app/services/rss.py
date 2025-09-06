@@ -313,6 +313,7 @@ class RSSService:
             random.shuffle(feeds)   # ✅ ترتیب فیدها هر بار رندوم میشه
 
             for url in feeds:
+                print("💣this is the target ====",url)
                 url = ensure_scheme(url)
                 try:
                     # مسیر RSS
