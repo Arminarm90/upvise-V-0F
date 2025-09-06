@@ -249,8 +249,6 @@ async def format_entry(
       (🔻 ریسک‌ها…)
       (📊 سیگنال…)
       منبع(لینک)
-
-    اصل جدید: حتی اگر خلاصه‌سازی یا متن خام نداشتیم، حداقل «عنوان + لینک» ارسال می‌شود.
     """
     # زبان خلاصه: پارامتر → زبان پرامپت summarizer → پیش‌فرض fa
     lang = (lang or getattr(summarizer, "prompt_lang", "fa") or "fa").lower()
@@ -262,24 +260,22 @@ async def format_entry(
     date = _fmt_date(entry)
     meta_line = TEMPLATE_META.format(source=esc(source_label), date=esc(date))
 
-    # 2) متن پایه (در صورت نبود، خلاصه‌سازی را جا می‌اندازیم اما پیام را می‌فرستیم)
+    # 2) متن پایه
     raw = await _raw_from_entry(entry, link)
+    if not raw:
+        return None
 
-    tldr = ""
-    bullets: List[str] = []
-    opps: List[str] = []
-    risks: List[str] = []
-    signal = ""
+    # 3) خلاصه‌سازی منعطف (fa/en بر اساس lang)
+    author = _author_of(entry) or None
+    data = await _summarize_flexible(summarizer, title=title, text=raw, author=author)
+    tldr = data.get("tldr") or ""
+    bullets = data.get("bullets") or []
+    opps = data.get("opportunities") or []
+    risks = data.get("risks") or []
+    signal = data.get("signal") or ""
 
-    if raw:
-        # 3) خلاصه‌سازی منعطف
-        author = _author_of(entry) or None
-        data = await _summarize_flexible(summarizer, title=title, text=raw, author=author)
-        tldr = data.get("tldr") or ""
-        bullets = data.get("bullets") or []
-        opps = data.get("opportunities") or []
-        risks = data.get("risks") or []
-        signal = data.get("signal") or ""
+    if not (tldr or bullets):
+        return None
 
     # 4) اِعمال سقف‌ها
     cap = int(getattr(settings, "summary_max_bullets", 4))
@@ -288,12 +284,14 @@ async def format_entry(
     final_risks = _cap_section(risks, max(1, min(cap, 4)))
     final_signal = (signal or "").strip()
 
-    # 5) ساخت پیام نهایی (HTML تلگرام) — همیشه حداقل عنوان+لینک
-    parts: List[str] = [TEMPLATE_TITLE.format(title=esc(title)), meta_line]
-
-    # اگر چیزی برای نمایش هست، سکشن‌ها را اضافه کن
-    if tldr:
-        parts += ["", TEMPLATE_LEAD.format(lead=esc(tldr)), ""]
+    # 5) ساخت پیام نهایی (HTML تلگرام)
+    parts: List[str] = [
+        TEMPLATE_TITLE.format(title=esc(title)),
+        meta_line,
+        "",
+        TEMPLATE_LEAD.format(lead=esc(tldr or "")),
+        "",
+    ]
     if final_bullets:
         parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_bullets]
 
@@ -302,6 +300,7 @@ async def format_entry(
     lbl_risk = t("msg.risks", lang)
     lbl_signal = t("msg.signal", lang)
 
+    # سکشن‌های 2x Premium
     if final_opps:
         parts.append("")
         parts.append(TEMPLATE_HEAD_OPP.format(label=esc(lbl_opp)))
@@ -320,7 +319,7 @@ async def format_entry(
     if link:
         parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
 
-    return "\n".join([p for p in parts if isinstance(p, str)]).strip()
+    return "\n".join(parts).strip()
 
 
 # ==== قالب‌ساز واحد: Page-Watch Article ====
@@ -343,8 +342,6 @@ async def format_article(
       (🔻 ریسک‌ها…)
       (📊 سیگنال…)
       منبع(لینک)
-
-    اصل جدید: حتی اگر خلاصه‌سازی یا متن خام نداشتیم، حداقل «عنوان + لینک» ارسال می‌شود.
     """
     lang = (lang or getattr(summarizer, "prompt_lang", "fa") or "fa").lower()
 
@@ -354,20 +351,18 @@ async def format_article(
     meta_line = TEMPLATE_META.format(source=esc(source_label), date=esc(date))
 
     raw = (text or "").strip()
+    if not raw:
+        return None
 
-    tldr = ""
-    bullets: List[str] = []
-    opps: List[str] = []
-    risks: List[str] = []
-    signal = ""
+    data = await _summarize_flexible(summarizer, title=safe_title, text=raw, author=None)
+    tldr = data.get("tldr") or ""
+    bullets = data.get("bullets") or []
+    opps = data.get("opportunities") or []
+    risks = data.get("risks") or []
+    signal = data.get("signal") or ""
 
-    if raw:
-        data = await _summarize_flexible(summarizer, title=safe_title, text=raw, author=None)
-        tldr = data.get("tldr") or ""
-        bullets = data.get("bullets") or []
-        opps = data.get("opportunities") or []
-        risks = data.get("risks") or []
-        signal = data.get("signal") or ""
+    if not (tldr or bullets):
+        return None
 
     cap = int(getattr(settings, "summary_max_bullets", 4))
     final_bullets = _cap_bullets(bullets, cap)
@@ -375,10 +370,13 @@ async def format_article(
     final_risks = _cap_section(risks, max(1, min(cap, 4)))
     final_signal = (signal or "").strip()
 
-    parts: List[str] = [TEMPLATE_TITLE.format(title=esc(safe_title)), meta_line]
-
-    if tldr:
-        parts += ["", TEMPLATE_LEAD.format(lead=esc(tldr)), ""]
+    parts: List[str] = [
+        TEMPLATE_TITLE.format(title=esc(safe_title)),
+        meta_line,
+        "",
+        TEMPLATE_LEAD.format(lead=esc(tldr or "")),
+        "",
+    ]
     if final_bullets:
         parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_bullets]
 
@@ -404,4 +402,4 @@ async def format_article(
     if link:
         parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
 
-    return "\n".join([p for p in parts if isinstance(p, str)]).strip()
+    return "\n".join(parts).strip()
