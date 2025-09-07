@@ -92,7 +92,7 @@ class Settings:
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/125 Safari/537.36",
     )
-    rss_max_items_per_feed: int = _get_int("RSS_MAX_ITEMS_PER_FEED", 10)
+    rss_max_items_per_feed: int = _get_int("RSS_MAX_ITEMS_PER_FEED", 5)
     rss_batch_size: int = _get_int("RSS_BATCH_SIZE", 3)             # چند فید در هر poll
     rss_fetch_concurrency: int = _get_int("RSS_FETCH_CONCURRENCY", 3) # concurrency برای fetch
 

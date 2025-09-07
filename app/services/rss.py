@@ -39,7 +39,7 @@ except Exception:
         )
         rss_timeout = 12
         fetcher_timeout = 12
-        rss_max_items_per_feed = 10
+        rss_max_items_per_feed = 5
         pagewatch_listing_limit = 30
         pagewatch_links_per_cycle = 3
         rss_ua = ua
