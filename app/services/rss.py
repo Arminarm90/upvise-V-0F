@@ -1,7 +1,7 @@
 # app/services/rss.py
 # -*- coding: utf-8 -*-
 from __future__ import annotations
-
+import re
 import asyncio
 import logging
 import time
@@ -23,7 +23,9 @@ from .summary import Summarizer
 from ..storage.state import StateStore
 from ..utils.message_formatter import format_entry, format_article
 from ..utils.i18n import get_chat_lang
-
+from ..utils.message_formatter import format_entry, format_article, _fmt_date
+from ..utils.text import html_escape as esc, html_attr_escape as esc_attr
+from ..utils.i18n import t as _t
 # sites 
 from sites import google_trends
 # تنظیمات پروژه (fallback امن اگر کلیدها وجود نداشتند)
@@ -72,7 +74,8 @@ class RSSService:
         self.poll_sec = poll_sec
         self.stats = {"sent": 0, "skipped": 0, "reasons": {}}
          # نگهداری ایندکس (cursor) برای هر چت در runtime
-        self._cursor_per_chat: dict[int, int] = {}
+        self._fallback_cache: dict[tuple[int,str], float] = {}   # key = (chat_id, entry_id)
+        self._cursor_per_chat: dict[int,int] = {}
     # ------------------------------------------------------------------ #
     # Feeds
     # ------------------------------------------------------------------ #
@@ -285,6 +288,199 @@ class RSSService:
         except Exception:
             pass
         return fallback
+    
+    # ---------- helpers for fallback & summarizer wrapper ----------
+
+    # def _fmt_date(self, entry) -> str:
+    #     """تبدیل تاریخ RSS به YYYY-MM-DD (published → updated). اگر نبود رشته خالی برمی‌گرداند."""
+    #     try:
+    #         if getattr(entry, "published_parsed", None):
+    #             return datetime(*entry.published_parsed[:6]).strftime("%Y-%m-%d")
+    #         if getattr(entry, "updated_parsed", None):
+    #             return datetime(*entry.updated_parsed[:6]).strftime("%Y-%m-%d")
+    #     except Exception:
+    #         pass
+    #     return ""
+
+    async def _search_related(self, query: str, max_results: int = 3) -> list:
+        """
+        Wrapper که تلاش می‌کند از self.search استفاده کند تا نتایج مرتبط بگیرد.
+        خروجی: لیستی از dict با حداقل کلید 'link' و ترجیحاً 'title' و 'snippet'.
+        """
+        if not query:
+            return []
+        try:
+            # تلاشی برای تطبیق API های مختلف SearchService
+            if self.search:
+                # try common method names
+                for name in ("search", "search_web", "web_search", "search_google", "search_serper", "query"):
+                    fn = getattr(self.search, name, None)
+                    if callable(fn):
+                        try:
+                            res = await fn(query, max_results) if asyncio.iscoroutinefunction(fn) else fn(query, max_results)
+                            # Normalize: expect list of dicts or list of tuples/strings
+                            out = []
+                            for it in (res or [])[:max_results]:
+                                if isinstance(it, dict):
+                                    out.append(it)
+                                elif isinstance(it, (list, tuple)) and len(it) >= 1:
+                                    out.append({"link": it[0], "title": it[1] if len(it) > 1 else ""})
+                                elif isinstance(it, str):
+                                    out.append({"link": it})
+                            if out:
+                                return out
+                        except Exception:
+                            continue
+        except Exception:
+            LOG.debug("_search_related failed", exc_info=True)
+
+        # اگر هیچ SearchService ای در دسترس نبود یا ناموفق بود، برگردون خالی
+        return []
+
+    async def _build_text_from_search(self, items: list, max_chars: int = 3500) -> str:
+        """
+        با گرفتن نتایج جستجو (لیستی از dict که حداقل 'link' دارند)،
+        صفحات مرتبط را fetch می‌کند (با concurrency محدود) و متن‌ها را concat می‌کند.
+        خروجی: متن تجمیع شده تا max_chars.
+        """
+        if not items:
+            return ""
+        sem = asyncio.Semaphore(int(getattr(settings, "fetcher_concurrency", 4)))
+        async def _fetch_text(url):
+            async with sem:
+                try:
+                    html = await self._get_html(url)
+                    if not html:
+                        return ""
+                    soup = BeautifulSoup(html, "html.parser")
+                    for t in soup(["script","style","noscript"]):
+                        t.decompose()
+                    text = soup.get_text(" ", strip=True)
+                    # پاک‌سازی اضافه
+                    text = re.sub(r"\s+", " ", text).strip()
+                    return text
+                except Exception:
+                    return ""
+
+        tasks = []
+        # محدود کن به چند لینک اول
+        for it in items[:6]:
+            link = (it.get("link") or it.get("url") or "").strip()
+            if link:
+                tasks.append(asyncio.create_task(_fetch_text(link)))
+        if not tasks:
+            return ""
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        parts = []
+        total = 0
+        for r in results:
+            if isinstance(r, Exception) or not r:
+                continue
+            parts.append(r)
+            total += len(r)
+            if total >= max_chars:
+                break
+        if not parts:
+            return ""
+        agg = "\n\n".join(parts)
+        return agg[:max_chars]
+
+    async def _ai_summarize_full(self, title: str, text: str) -> dict:
+        """
+        Wrapper که خروجی استاندارد dict می‌دهد:
+        {tldr, bullets, opportunities, risks, signal}
+        استفاده: fallback web text -> این رو فراخوان کن.
+        """
+        try:
+            if not self.summarizer:
+                return {"tldr":"", "bullets":[], "opportunities":[], "risks":[], "signal":""}
+
+            # اگر summarizer متد summarize_full داره ازش استفاده کن
+            sf = getattr(self.summarizer, "summarize_full", None)
+            if callable(sf):
+                try:
+                    res = await sf(title=title, text=text, author=None)
+                except TypeError:
+                    # در صورت signature متفاوت
+                    res = await sf(title, text)
+                # res ممکنه tuple یا dict باشه
+                if isinstance(res, dict):
+                    return {
+                        "tldr": (res.get("tldr") or "") if isinstance(res.get("tldr",""), str) else "",
+                        "bullets": list(res.get("bullets") or []),
+                        "opportunities": list(res.get("opportunities") or []),
+                        "risks": list(res.get("risks") or []),
+                        "signal": (res.get("signal") or "") if isinstance(res.get("signal",""), str) else "",
+                    }
+                if isinstance(res, (list, tuple)):
+                    tldr, bullets, opportunities, risks, signal = (list(res) + ["", [], [], [], ""])[:5]
+                    return {
+                        "tldr": tldr or "",
+                        "bullets": list(bullets or []),
+                        "opportunities": list(opportunities or []),
+                        "risks": list(risks or []),
+                        "signal": signal or "",
+                    }
+
+            # اگر summarize_full موجود نیست یا خالی داد، fallback به summarize (tl;dr + bullets)
+            sfn = getattr(self.summarizer, "summarize", None)
+            if callable(sfn):
+                try:
+                    tldr, bullets = await sfn(title=title, text=text, author=None)
+                except TypeError:
+                    tldr, bullets = await sfn(title, text)
+                return {"tldr": tldr or "", "bullets": list(bullets or []), "opportunities":[], "risks":[], "signal":""}
+        except Exception:
+            LOG.exception("_ai_summarize_full failed", exc_info=True)
+
+        return {"tldr":"", "bullets":[], "opportunities":[], "risks":[], "signal":""}
+
+    def _build_message_from_full(self, title: str, feed_title: str, date: str, parts: dict, src_link: str, lang: str = "fa") -> str:
+        """
+        ساخت پیام HTML یکنواخت از خروجی full summary (parts dict).
+        قالب: Title / Feed | date / TLDR / bullets / opportunities / risks / signal / منبع
+        """
+        # header
+        safe_title = esc(title or "")
+        safe_feed = esc(feed_title or "")
+        meta = esc(date or "")
+        header = f"<b>{safe_title}</b>\n<i>{safe_feed}</i> | <i>{meta}</i>\n\n"
+
+        body_parts = []
+        tldr = (parts.get("tldr") or "").strip()
+        if tldr:
+            body_parts.append(f"🔰 {esc(tldr)}\n")
+
+        bullets = parts.get("bullets") or []
+        for b in bullets:
+            body_parts.append(f"✔️ {esc(b)}")
+
+        # opportunities
+        opps = parts.get("opportunities") or []
+        if opps:
+            body_parts.append("\n🔺 " + esc(_t("msg.opportunities", lang)))
+            for o in opps:
+                body_parts.append(f"✔️ {esc(o)}")
+
+        # risks
+        risks = parts.get("risks") or []
+        if risks:
+            body_parts.append("\n🔻 " + esc(_t("msg.risks", lang)))
+            for r in risks:
+                body_parts.append(f"✔️ {esc(r)}")
+
+        # signal
+        sig = (parts.get("signal") or "").strip()
+        if sig:
+            body_parts.append("\n📊 " + esc(_t("msg.signal", lang)))
+            body_parts.append(f"• {esc(sig)}")
+
+        # source link
+        if src_link:
+            body_parts.append(f'\n<a href="{esc_attr(src_link)}">{esc(_t("msg.source", lang))}</a>')
+
+        return header + "\n".join(body_parts).strip()
 
     async def _process_feed(self, app: Application, cid_int: int, url: str, f, chat_lang: str, reporter):
         """
@@ -318,31 +514,86 @@ class RSSService:
             feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
 
             # پردازش هر entry (همان منطق سابق، با reporter-safe)
+            # پردازش هر entry (همان منطق سابق، با reporter-safe)
             for eid, e in reversed(new_entries):
-                html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
-                if not html or not str(html).strip():
-                    # اگر خلاصه‌ساز چیزی نداد، علامت بزن و ادامه بده
-                    reason = "ai_empty_output"
-                    self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
-                    self.stats["skipped"] += 1
-                    if reporter:
-                        try: reporter.record(url, "skipped", reason)
-                        except Exception: pass
-                    continue
+                title_text = getattr(e, "title", "") or ""
+                
+                # مرحله ۱: تلاش برای خلاصه AI (مستقیماً summarize_full را صدا بزن)
+                parts = await self.summarizer.summarize_full(title_text, getattr(e, "summary", ""))
+                
+                # Check if the AI summary has meaningful content (tldr or bullets)
+                tldr = parts[0]
+                bullets = parts[1]
+                has_meaningful_summary = bool(tldr or bullets)
 
-                # ارسال پیام
-                try:
-                    await app.bot.send_message(chat_id=cid_int, text=html, parse_mode="HTML", disable_web_page_preview=True)
+                if has_meaningful_summary:
+                    # اگر خلاصه معنادار داشت، فرمت و ارسال کن
+                    date = _fmt_date(e)
+                    src_link = getattr(e, "link", "")
+                    msg = self._build_message_from_full(title_text, feed_title, date, {"tldr":tldr, "bullets":bullets, "opportunities":parts[2], "risks":parts[3], "signal":parts[4]}, src_link, lang=chat_lang)
+                    await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
                     self.stats["sent"] += 1
                     seen.add(eid)
                     if reporter:
-                        try: reporter.record(url, "sent")
-                        except Exception: pass
-                except Exception:
-                    LOG.debug("send_message failed for %s (cid=%s)", url, cid_int, exc_info=True)
+                        reporter.record(url, "sent", extra="ai_summary")
+                    self.store.set_seen(cid_int, url, seen)
+                    continue
+
+                # مرحله ۲: اگر خلاصه معنادار نبود، وارد منطق فال‌بک شو
+                reason = "ai_empty_output"
+                self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
+                self.stats["skipped"] += 1
+
+                # ---------- throttle fallback per (chat, entry) ----------
+                throttle_sec = int(getattr(settings, "search_fallback_throttle_sec", 600))
+                last = self._fallback_cache.get((cid_int, eid), 0)
+                if time.time() - last < throttle_sec:
+                    if reporter:
+                        reporter.record(url, "skipped", reason=reason, extra="fallback_throttled")
+                    continue
+                self._fallback_cache[(cid_int, eid)] = time.time()
+
+                # ---------- web-search fallback flow (همان کدی که قبلاً گذاشتی) ----------
+                if title_text:
+                    try:
+                        search_items = await self._search_related(title_text, max_results=int(getattr(settings, "search_fallback_max_results", 3)))
+                        if search_items:
+                            agg = await self._build_text_from_search(search_items, max_chars=int(getattr(settings, "search_fallback_max_chars", 3500)))
+                            print("===== agg from search:", agg)
+                            if agg:
+                                parts_search = await self._ai_summarize_full(title_text, agg)
+                                if (parts_search.get("tldr") or parts_search.get("bullets")):
+                                    date = _fmt_date(e)
+                                    src_link = getattr(e, "link", "") or (search_items[0].get("link") or "")
+                                    msg = self._build_message_from_full(title_text, feed_title, date, parts_search, src_link, lang=chat_lang)
+                                    await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                                    self.stats["sent"] += 1
+                                    seen.add(eid)
+                                    if reporter:
+                                        reporter.record(url, "sent", extra="web_fallback")
+                                    self.store.set_seen(cid_int, url, seen)
+                                    continue
+                    except Exception:
+                        LOG.debug("search fallback failed for title=%r", title_text, exc_info=True)
+
+                if reporter:
+                    reporter.record(url, "skipped", reason=reason, extra="No summary after fallback")
+                continue
+
+
+                # # ارسال پیام
+                # try:
+                #     await app.bot.send_message(chat_id=cid_int, text=html, parse_mode="HTML", disable_web_page_preview=True)
+                #     self.stats["sent"] += 1
+                #     seen.add(eid)
+                #     if reporter:
+                #         try: reporter.record(url, "sent")
+                #         except Exception: pass
+                # except Exception:
+                #     LOG.debug("send_message failed for %s (cid=%s)", url, cid_int, exc_info=True)
 
             # ذخیره seen برای این چت و فید
-            self.store.set_seen(cid_int, url, seen)
+            # self.store.set_seen(cid_int, url, seen)
 
         except Exception as ex:
             LOG.exception("process_feed error for %s (cid=%s): %s", url, cid_int, ex)

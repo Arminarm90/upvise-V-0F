@@ -115,7 +115,16 @@ class Settings:
     summary_lite_min_len: int = _get_int("SUMMARY_LITE_MIN_LEN", 120)
     summary_max_bullets: int = _get_int("SUMMARY_MAX_BULLETS", 4)
     summary_strict: bool = _get_bool("SUMMARY_STRICT", True)
+    summary_max_attempts = 6
+    summary_min_tldr_len = 60            # حداقل طول مفید برای TLDR تلقی شدن (قابل تنظیم)
+    summary_short_threshold = 120
+    search_fallback_throttle_sec = 600
+    search_fallback_max_results = 3
+    search_fallback_max_chars = 3500
+    fetcher_concurrency = 4
 
+
+    
     # --- Ephemeral Messages ---
     ephemeral_mode: bool = _get_bool("EPHEMERAL_MODE", True)
     ephemeral_delete_sec: int = _get_int("EPHEMERAL_DELETE_SEC", 5)

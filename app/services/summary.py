@@ -3,6 +3,8 @@
 from __future__ import annotations
 from typing import Tuple, List, Optional
 import json, re
+import asyncio
+import itertools
 
 try:
     import google.generativeai as genai
@@ -22,32 +24,37 @@ except Exception:
 
 from app.config import settings
 
+# DEBUG
+import logging
+
+LOG = logging.getLogger("summary")
+
 
 def _system_prompt(lang: str) -> str:
     if (lang or "").lower().startswith("fa"):
         return (
             "خروجی فقط فارسی و روان باشد. لحن تحلیلی و کاربردی.\n"
             "دقیقاً و فقط یک JSON با کلیدهای زیر برگردان؛ هیچ متن اضافه ننویس. "
-            "اگر هر بخشی دادهٔ کافی نداشت، مقدار همان بخش را خالی بگذار (آرایهٔ خالی [] یا رشتهٔ خالی \"\").\n"
+            'اگر هر بخشی دادهٔ کافی نداشت، مقدار همان بخش را خالی بگذار (آرایهٔ خالی [] یا رشتهٔ خالی "").\n'
             "{"
-            "\"tldr\":\"۱–۳ جملهٔ جمع‌بندی تحلیلی؛ از تکرار عنوان خودداری کن\","
-            "\"bullets\":[\"۳ تا ۶ نکتهٔ نتیجه‌محور؛ هر نکته با فعل شروع شود\"],"
-            "\"opportunities\":[\"فرصت‌های کلیدی، مختصر و عملی\"],"
-            "\"risks\":[\"ریسک‌ها/محدودیت‌ها، شفاف و واقع‌گرایانه\"],"
-            "\"signal\":\"یک پیام/سیگنال کاربردی برای خواننده (در یک یا دو جمله)\""
+            '"tldr":"۱–۳ جملهٔ جمع‌بندی تحلیلی؛ از تکرار عنوان خودداری کن",'
+            '"bullets":["۳ تا ۶ نکتهٔ نتیجه‌محور؛ هر نکته با فعل شروع شود"],'
+            '"opportunities":["فرصت‌های کلیدی، مختصر و عملی"],'
+            '"risks":["ریسک‌ها/محدودیت‌ها، شفاف و واقع‌گرایانه"],'
+            '"signal":"یک پیام/سیگنال کاربردی برای خواننده (در یک یا دو جمله)"'
             "}\n"
             "اگر داده ناکافی بود، محتاطانه خلاصه کن؛ اما باز هم فقط همین JSON را برگردان."
         )
     return (
         "Output must be in clear English with an analytical, practical tone.\n"
         "Return EXACTLY one JSON object with the keys below and nothing else. "
-        "If any section lacks sufficient content, leave it empty (use [] for lists and \"\" for strings).\n"
+        'If any section lacks sufficient content, leave it empty (use [] for lists and "" for strings).\n'
         "{"
-        "\"tldr\":\"1–3 analytical sentences; do not repeat the title\","
-        "\"bullets\":[\"3–6 action-oriented key points; each starts with a verb\"],"
-        "\"opportunities\":[\"Concise, actionable opportunities\"],"
-        "\"risks\":[\"Clear, realistic risks/limitations\"],"
-        "\"signal\":\"One concise, practical takeaway for the reader\""
+        '"tldr":"1–3 analytical sentences; do not repeat the title",'
+        '"bullets":["3–6 action-oriented key points; each starts with a verb"],'
+        '"opportunities":["Concise, actionable opportunities"],'
+        '"risks":["Clear, realistic risks/limitations"],'
+        '"signal":"One concise, practical takeaway for the reader"'
         "}\n"
         "If content is limited, summarize cautiously; still return ONLY this JSON."
     )
@@ -74,7 +81,9 @@ def _dedupe_cap(bullets: List[str], cap: int = 6) -> List[str]:
 
 
 def _strip_code_fences(s: str) -> str:
-    return re.sub(r"^```(?:json)?|```$", "", (s or "").strip(), flags=re.I | re.M).strip()
+    return re.sub(
+        r"^```(?:json)?|```$", "", (s or "").strip(), flags=re.I | re.M
+    ).strip()
 
 
 # ---------- NEW: translate helpers ----------
@@ -86,6 +95,7 @@ def _detect_lang(s: str) -> str:
         return (_ld_detect(s) or "").split("-", 1)[0].lower()
     except Exception:
         return ""
+
 
 def _translate(s: str, target: str) -> str:
     """Translate using deep-translator; if unavailable, return s."""
@@ -99,7 +109,10 @@ def _translate(s: str, target: str) -> str:
     except Exception:
         return s
 
-def _force_lang(tldr: str, bullets: List[str], target_lang: str) -> Tuple[str, List[str]]:
+
+def _force_lang(
+    tldr: str, bullets: List[str], target_lang: str
+) -> Tuple[str, List[str]]:
     """
     If summary_strict is enabled or detected language != target, translate.
     Works for both AI and Lite outputs.
@@ -119,8 +132,9 @@ def _force_lang(tldr: str, bullets: List[str], target_lang: str) -> Tuple[str, L
         return tldr, bullets
 
     tldr_t = _translate(tldr, tgt) if tldr else ""
-    bullets_t = [ _translate(b, tgt) for b in (bullets or []) ]
+    bullets_t = [_translate(b, tgt) for b in (bullets or [])]
     return tldr_t or tldr, bullets_t or bullets
+
 
 # ---------- NEW: language enforcement for premium fields ----------
 def _force_lang_full(
@@ -142,18 +156,23 @@ def _force_lang_full(
 
     # تصمیم ترجمه بر اساس همان شرط سخت‌گیرانه
     strict = str(getattr(settings, "summary_strict", "false")).lower() == "true"
-    sample = " ".join((opportunities or []) + (risks or []) + ([signal] if signal else []))[:400]
+    sample = " ".join(
+        (opportunities or []) + (risks or []) + ([signal] if signal else [])
+    )[:400]
     src = _detect_lang(sample)
     must_translate = strict or (src and src != tgt)
 
     if not must_translate:
         return tldr2, bullets2, opportunities, risks, signal
 
-    opp2 = [ _translate(x, tgt) for x in (opportunities or []) ]
-    risk2 = [ _translate(x, tgt) for x in (risks or []) ]
-    sig2  = _translate(signal, tgt) if signal else signal
+    opp2 = [_translate(x, tgt) for x in (opportunities or [])]
+    risk2 = [_translate(x, tgt) for x in (risks or [])]
+    sig2 = _translate(signal, tgt) if signal else signal
     return tldr2, bullets2, opp2 or opportunities, risk2 or risks, sig2 or signal
+
+
 # --------------------------------------------
+
 
 def _extract_json(raw: str) -> str:
     """
@@ -167,14 +186,17 @@ def _extract_json(raw: str) -> str:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
-        return cleaned[start:end+1]
+        return cleaned[start : end + 1]
     return cleaned
+
 
 # Get API Key
 import itertools
 
 # Round-Robin بجای random
 _key_cycle = None
+
+
 def get_gemini_key() -> str:
     global _key_cycle
     if not settings.gemini_keys:
@@ -183,171 +205,298 @@ def get_gemini_key() -> str:
         _key_cycle = itertools.cycle(settings.gemini_keys)
     return next(_key_cycle)
 
+
+# ---------- Lite summary (kept disabled) ----------
+# def _lite_summary(title: str, text: str) -> Tuple[str, List[str]]:
+#     """
+#     Heuristic TLDR + bullets from the raw text (no AI).
+#     Used as a robust fallback when AI fails or input is very short.
+#     """
+#     src = (text or "").strip()
+#     if not src:
+#         return "", []
+#     # کوتاه‌سازی و جستجوی جملات معنی‌دار
+#     sentences = re.split(r"(?<=[.!؟\?])\s+", src)
+#     # tldr: دو جمله اول یا عنوان + جمله اول
+#     tldr_candidates = [s for s in sentences if len(s) > 20]
+#     tldr = ""
+#     if tldr_candidates:
+#         tldr = " ".join(tldr_candidates[:2]).strip()
+#     else:
+#         # اگر جمله بلند نداشت، بردار از متن کوتاه‌تر
+#         tldr = (src[:200]).strip()
+
+#     # bullets: خطوط/جملات که فعل دارند یا طولانی هستند
+#     points: List[str] = []
+#     for line in re.split(r"[\n\r]+", src):
+#         l = line.strip()
+#         if not l:
+#             continue
+#         if len(l) < 30:
+#             continue
+#         if any(
+#             k in l.lower()
+#             for k in (
+#                 "should",
+#                 "will",
+#                 "can",
+#                 "lead",
+#                 "include",
+#                 "increase",
+#                 "reduce",
+#                 "cause",
+#                 "help",
+#                 "need",
+#                 "است",
+#                 "می‌شود",
+#                 "می‌تواند",
+#                 "خواهد",
+#             )
+#         ):
+#             points.append(l)
+#         if len(points) >= getattr(settings, "summary_max_bullets", 4):
+#             break
+
+#     if not points:
+#         # fallback: بردار جملات طولانی‌تر
+#         long_sents = [s for s in sentences if len(s) > 40]
+#         points = long_sents[: getattr(settings, "summary_max_bullets", 4)]
+
+#     bullets = _dedupe_cap(points, cap=getattr(settings, "summary_max_bullets", 4))
+#     # enforce language lightly
+#     tldr, bullets = _force_lang(tldr, bullets, getattr(settings, "prompt_lang", "fa"))
+#     return tldr, bullets
+
+
+async def _call_ai(model, prompt: str) -> str:
+    """یک فراخوانی امن به Gemini که raw text برمی‌گرداند یا ''."""
+    try:
+        resp = await model.generate_content_async(prompt)
+        raw = _strip_code_fences(getattr(resp, "text", "") or "")
+        return raw
+    except Exception as ex:
+        LOG.debug("_call_ai_once failed: %s", ex)
+        return ""
+
+
 class Summarizer:
     """
     Summary chain with Gemini primary and Lite fallback.
     Guarantees (tldr, bullets). Enforces user language if possible.
     """
+
     print("🔑 Gemini using key:", get_gemini_key())
+
     def __init__(self, api_key: Optional[str], prompt_lang: str = "fa"):
         self.api_key = api_key
         self.prompt_lang = (prompt_lang or "fa").lower()
         self._fail_count = 0
         self._cooldown_until: Optional[float] = None
 
-    async def _call_ai(self, title: str, text: str) -> Tuple[str, List[str]]:
-        if not (genai and self.api_key):
-            return "", []
-
-        import time
-        if self._cooldown_until and time.time() < self._cooldown_until:
-            return "", []
-        try:
-            api_key = get_gemini_key()   # 👈 هر بار یه کلید جدید
-            print("🔑 Gemini using key======", api_key)
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(settings.summary_model_name)
-
-            prompt = (
-                _system_prompt(self.prompt_lang)
-                + f"\nTitle: {title or '-'}\n"
-                + f"Content:\n{(text or '')[:settings.summary_max_input_chars]}"
-            )
-
-            resp = await model.generate_content_async(prompt)
-            raw = _strip_code_fences(getattr(resp, "text", "") or "")
-
-            # --- نرم‌تر کردن JSON parsing ---
-            tldr, bullets = "", []
-            try:
-                data = json.loads(raw)
-                tldr = (data.get("tldr") or "").strip()
-                bullets = _dedupe_cap(
-                    [x for x in (data.get("bullets") or []) if isinstance(x, str)],
-                    cap=settings.summary_max_bullets,
-                )
-            except Exception:
-                # ❗ اگر JSON خراب بود، خام متن رو برگردون
-                tldr = raw.strip()[:300]
-                bullets = []
-
-            # enforce language (اما فقط اگر چیزی وجود داشت)
-            if tldr or bullets:
-                tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
-
-            self._fail_count = 0
-            self._cooldown_until = None
-            return tldr, bullets
-
-        except Exception as ex:
-            # فقط برای خطای جدی fail counter زیاد شه
-            self._fail_count += 1
-            if self._fail_count >= settings.summary_cb_errors:
-                import time
-                self._cooldown_until = time.time() + settings.summary_cb_cooldown_sec
-            return "", []
-
-
-    # ---------- NEW: full premium summary ----------
     async def summarize_full(
         self, title: str, text: str, author: Optional[str] = None
     ) -> Tuple[str, List[str], List[str], List[str], str]:
         """
-        خروجی پرمیوم: (tldr, bullets, opportunities, risks, signal)
-        - بدون Fail Counter / Cooldown
-        - همیشه فقط AI
+        تلاش چندمرحله‌ای حداکثری روی Gemini. اگر نتایج JSON نبودند
+        تلاش می‌کنیم TLDR/bullets را از متن خام استخراج کنیم.
         """
         title = (title or "").strip()
         text = (text or "").strip()
-        base = (text if len(text) > getattr(settings, "summary_lite_min_len", 120) else f"{title}\n{text}").strip()
+        base = (
+            text
+            if len(text) > getattr(settings, "summary_lite_min_len", 120)
+            else f"{title}\n{text}"
+        ).strip()
         if not base:
             return "", [], [], [], ""
 
         if not (genai and self.api_key):
-            return "", [], [], [], ""
+            LOG.debug("summarize_full: no genai or api key")
+            # اگر کماکان میخوایم حتما AI باشه بدون fallback، return خالی:
+            # return "", [], [], [], ""
+            # اما برای جلوگیری از پیام‌های کاملا خالی، یه tldr‌ کوتاه از عنوان بساز:
+            return (title[:200] or ""), [], [], [], ""
 
         try:
-            api_key = get_gemini_key()   # 👈 هر بار یه کلید جدید
-            print("🔑 Gemini using key=====", api_key)
+            api_key = get_gemini_key()
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(settings.summary_model_name)
+        except Exception as ex:
+            LOG.exception("summarize_full: model init failed: %s", ex)
+            return "", [], [], [], ""
 
-            prompt = (
-                _system_prompt(self.prompt_lang)
-                + f"\nTitle: {title or '-'}\n"
-                + f"Content:\n{(base or '')[:getattr(settings, 'summary_max_input_chars', 6000)]}"
-            )
 
-            resp = await model.generate_content_async(prompt)
-            raw = _strip_code_fences(getattr(resp, "text", "") or "")
-            data = {}
+        # تنظیمات قابل تغییر در config:
+        max_attempts = int(getattr(settings, "summary_max_attempts", 6))
+        short_threshold = int(getattr(settings, "summary_short_threshold", 120))
+        max_input = int(getattr(settings, "summary_max_input_chars", 6000))
+
+        # prompt های مرحله‌ای (از سخت به نرم)
+        system = _system_prompt(self.prompt_lang)
+        strict_json_prompt = (
+            system + f"\nTitle: {title or '-'}\nContent:\n{(base or '')[:max_input]}"
+        )
+        softer_prompt = (
+            strict_json_prompt
+            + "\nIf you cannot output full JSON, try at least to return tldr and bullets in JSON."
+        )
+        unstructured_prompt = (
+            "Provide a concise TLDR (1 sentence) and 2-4 short action bullets. "
+            'If possible return JSON like {"tldr":"...","bullets":[...]}. Otherwise plain text is fine.\n'
+            + f"Title: {title or '-'}\nContent:\n{(base or '')[:max_input]}"
+        )
+        just_tldr_prompt = (
+            "Provide a single concise TLDR (one sentence) only.\n"
+            + f"Title: {title}\nContent:\n{(base or '')[:max_input]}"
+        )
+        just_bullets_prompt = (
+            "Provide 2-4 short action-oriented bullets only (one per line).\n"
+            + f"Title: {title}\nContent:\n{(base or '')[:max_input]}"
+        )
+
+        # ترتیب تلاش: strict → softer → unstructured → tldr only → bullets only
+        prompt_sequence = [strict_json_prompt, softer_prompt, unstructured_prompt]
+        if len(base) < short_threshold:
+            # برای خیلی کوتاه‌ها اضافه کن
+            prompt_sequence.append(just_tldr_prompt)
+            prompt_sequence.append(just_bullets_prompt)
+        # محدود کن بر اساس max_attempts
+        prompt_sequence = prompt_sequence[:max_attempts]
+
+        raw_collected = ""
+        parsed_obj = {}
+
+        def extract_from_raw(raw: str) -> dict:
+            """سعی در استخراج JSON یا تکه‌های مفید از متن خام."""
+            if not raw:
+                return {}
+            # 1) JSON extraction
+            jtxt = _extract_json(raw)
             try:
-                data = json.loads(raw)
+                obj = json.loads(jtxt)
+                if isinstance(obj, dict):
+                    return obj
             except Exception:
-                data = {}
+                pass
+            # 2) regex-based TLDR extraction
+            # look for lines starting with TLDR, TL;DR, Summary:
+            lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+            out = {}
+            for ln in lines[:5]:
+                low = ln.lower()
+                if (
+                    low.startswith("tldr")
+                    or low.startswith("tl;dr")
+                    or low.startswith("summary")
+                ):
+                    # take after ":" if exists
+                    if ":" in ln:
+                        out["tldr"] = ln.split(":", 1)[1].strip()
+                    else:
+                        out["tldr"] = ln.strip()
+                    break
+            # bullets: lines that start with -, •, or numbered
+            bullets = []
+            for ln in lines:
+                if ln.startswith(("-", "•", "*")) or re.match(r"^\d+[\).\s]", ln):
+                    cleaned = re.sub(r"^[\-\•\*\d\.\)\s]+", "", ln).strip()
+                    if len(cleaned) > 10:
+                        bullets.append(cleaned)
+            if bullets:
+                out.setdefault("bullets", bullets)
+            # fallback: if still empty, first sentence as tldr
+            if not out.get("tldr"):
+                first_sent = re.split(r"(?<=[.!؟\?])\s+", raw.strip())
+                if first_sent:
+                    out["tldr"] = first_sent[0][:300]
+            return out
 
-            # base fields
-            tldr = (data.get("tldr") or "").strip()
-            bullets = _dedupe_cap(
-                [x for x in (data.get("bullets") or []) if isinstance(x, str)],
-                cap=getattr(settings, "summary_max_bullets", 4),
+        # تلاش مرحله‌ای
+        for idx, p in enumerate(prompt_sequence, 1):
+            raw = await _call_ai(model, p)
+            LOG.debug(
+                "summarize_full attempt %d raw_len=%d title=%r",
+                idx,
+                len(raw or ""),
+                title,
             )
+            if not raw:
+                continue
+            raw_collected = raw
+            parsed = extract_from_raw(raw)
+            # قبول کن اگر حداقل tldr یا bullets داریم
+            if (
+                parsed.get("tldr")
+                or parsed.get("bullets")
+                or parsed.get("opportunities")
+                or parsed.get("risks")
+                or parsed.get("signal")
+            ):
+                parsed_obj = parsed
+                LOG.debug(
+                    "summarize_full: parsed from attempt %d -> keys=%s",
+                    idx,
+                    list(parsed.keys()),
+                )
+                break
+            # اگر JSON داشت ولی خالی، ادامه بده تا تلاش بعدی
 
-            # premium fields
-            opp_cap = int(getattr(settings, "summary_max_opportunities", getattr(settings, "summary_max_bullets", 4)))
-            risk_cap = int(getattr(settings, "summary_max_risks", getattr(settings, "summary_max_bullets", 4)))
+        # اگر باز هم parsed خالی، تلاش آخر: یک prompt بسیار ساده برای tldr
+        if not parsed_obj:
+            raw = await _call_ai(model, just_tldr_prompt)
+            parsed = extract_from_raw(raw)
+            if parsed.get("tldr") or parsed.get("bullets"):
+                parsed_obj = parsed
+                LOG.debug("summarize_full: got fallback tldr/bullets")
 
-            opportunities = _dedupe_cap(
-                [x for x in (data.get("opportunities") or []) if isinstance(x, str)],
-                cap=opp_cap,
+        # اگر کاملاً خالیه، از raw_collected یک tldr کوتاه جورش کن
+        # اگر کاملاً خالیه، از raw_collected یک tldr کوتاه جورش کن
+        if not parsed_obj:
+            if raw_collected:
+                parsed_obj = extract_from_raw(raw_collected)
+
+        # اگر همچنان خلاصه‌ای نداریم، عنوان را به عنوان TLDR قرار بده.
+        tldr_fallback = ""
+        if not parsed_obj.get("tldr") and title:
+            tldr_fallback = (title[:300] or "").strip()
+
+        # نرمالایز خروجی
+        tldr = (parsed_obj.get("tldr") or tldr_fallback).strip()
+        bullets = [x for x in (parsed_obj.get("bullets") or []) if isinstance(x, str)]
+        opportunities = [
+            x for x in (parsed_obj.get("opportunities") or []) if isinstance(x, str)
+        ]
+        risks = [x for x in (parsed_obj.get("risks") or []) if isinstance(x, str)]
+        signal = (parsed_obj.get("signal") or "").strip()
+
+        # caps و dedupe
+        bullets = _dedupe_cap(bullets, cap=getattr(settings, "summary_max_bullets", 4))
+        opp_cap = int(
+            getattr(
+                settings,
+                "summary_max_opportunities",
+                getattr(settings, "summary_max_bullets", 4),
             )
-            risks = _dedupe_cap(
-                [x for x in (data.get("risks") or []) if isinstance(x, str)],
-                cap=risk_cap,
+        )
+        risk_cap = int(
+            getattr(
+                settings,
+                "summary_max_risks",
+                getattr(settings, "summary_max_bullets", 4),
             )
-            signal = (data.get("signal") or "").strip()
+        )
+        opportunities = _dedupe_cap(opportunities, cap=opp_cap)
+        risks = _dedupe_cap(risks, cap=risk_cap)
 
-            # enforce language on all
+        # enforce language
+        try:
             tldr, bullets, opportunities, risks, signal = _force_lang_full(
                 tldr, bullets, opportunities, risks, signal, self.prompt_lang
             )
-
-            return tldr, bullets, opportunities, risks, signal
-
         except Exception:
-            # بازگشت امن با فیلدهای خالی
-            return "", [], [], [], ""
+            LOG.debug("summarize_full: _force_lang_full failed", exc_info=True)
 
-
-    # ---------- Lite summary (kept disabled) ----------
-    # def _lite_summary(self, title: str, text: str) -> Tuple[str, List[str]]:
-    #     """
-    #     Heuristic TLDR + bullets from the raw text (no AI).
-    #     Then enforces prompt_lang via translate helpers.
-    #     """
-    #     src = (text or "").strip()
-    #     if not src:
-    #         return "", []
-    #     sentences = re.split(r"(?<=[.!؟\?])\s+", src)
-    #     tldr = " ".join(sentences[:2]).strip()
-    #     tldr = re.sub(r"\s+", " ", tldr)[:300]
-    #     points: List[str] = []
-    #     for line in re.split(r"[\n\r]+", src):
-    #         line = line.strip()
-    #         if not line:
-    #             continue
-    #         if len(line) < 40:
-    #             continue
-    #         if any(k in line.lower() for k in ("should", "will", "can", "lead", "include", "increase", "reduce", "cause", "help", "need", "است", "می‌شود", "می‌تواند", "خواهد")):
-    #             points.append(line)
-    #         if len(points) >= getattr(settings, "summary_max_bullets", 4):
-    #             break
-    #     if not points:
-    #         long_sents = [s for s in sentences if len(s) > 50]
-    #         points = long_sents[: getattr(settings, "summary_max_bullets", 4)]
-    #     bullets = _dedupe_cap(points, cap=getattr(settings, "summary_max_bullets", 4))
-    #     tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
-    #     return tldr, bullets
+        return tldr or "", bullets or [], opportunities or [], risks or [], signal or ""
 
     async def summarize(
         self, title: str, text: str, author: Optional[str] = None
@@ -355,22 +504,23 @@ class Summarizer:
         title = (title or "").strip()
         text = (text or "").strip()
 
-        base = (text if len(text) > settings.summary_lite_min_len else f"{title}\n{text}").strip()
+        base = (
+            text if len(text) > settings.summary_lite_min_len else f"{title}\n{text}"
+        ).strip()
         if not base:
             return "", []
 
-        # 1) اول تست Gemini
+        # 1) try AI chain (multiple attempts inside _call_ai)
         tldr, bullets = await self._call_ai(title, base)
 
-        # 2) اگر خالی بود، یک بار دیگر با درخواست ساده‌تر تست کن
-        if not (tldr or bullets):
-            tldr, bullets = await self._call_ai(title, base + "\nSummarize clearly.")
+        # 2) if AI returned nothing, try lite heuristic
+        # if not (tldr or bullets):
+        #     tldr, bullets = _lite_summary(title, base)
 
-        # 3) اگر هنوز خالی بود، برو روی Lite fallback
-        if not (tldr or bullets):
-            tldr, bullets = self._lite_summary(title, base)
+        # 3) final normalization/enforce language
+        try:
+            tldr, bullets = _force_lang(tldr, bullets, self.prompt_lang)
+        except Exception:
+            pass
 
-        return tldr, bullets
-    
-        # 3) Lite fallback (disabled)
-        # return self._lite_summary(title, base)
+        return tldr or "", bullets or []
