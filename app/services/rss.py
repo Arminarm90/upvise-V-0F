@@ -18,8 +18,17 @@ from telegram.ext import Application
 from urllib.parse import quote
 import random
 
+from ..utils.message_formatter import (
+    format_entry,
+    format_article,
+    _fmt_date,
+    render_premium,
+    render_search_fallback,
+    render_title_only,
+)
 from ..utils.text import ensure_scheme, root_url
 from .summary import Summarizer
+from .summary import _translate as _summary_translate
 from ..storage.state import StateStore
 from ..utils.message_formatter import format_entry, format_article
 from ..utils.i18n import get_chat_lang
@@ -488,9 +497,8 @@ class RSSService:
         این تابع مسئول ارسال پیام‌ها، آپدیت seen و reporter/stat است.
         """
         try:
-            # special-case Google Trends: اگر ماژول سایت دارید از آن استفاده کن
+            # Google Trends
             if "trends.google.com/trending/rss" in url:
-                # google_trends.process_google_trends باید یک HTML آماده/پیغام برگرداند
                 html = await google_trends.process_google_trends(f, self.store, cid_int, url)
                 if html:
                     await app.bot.send_message(chat_id=cid_int, text=html, parse_mode="HTML", disable_web_page_preview=True)
@@ -505,7 +513,6 @@ class RSSService:
             cap = int(getattr(settings, "rss_max_items_per_feed", 10))
             new_entries = []
             for e in (getattr(f, "entries", []) or [])[:cap]:
-                # شناسهٔ entry
                 eid = self.entry_id(e) if "trends.google.com" not in url else f"trend:{(getattr(e,'title','') or '').strip()}"
                 if not eid or eid in seen:
                     continue
@@ -513,38 +520,47 @@ class RSSService:
 
             feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
 
-            # پردازش هر entry (همان منطق سابق، با reporter-safe)
-            # پردازش هر entry (همان منطق سابق، با reporter-safe)
             for eid, e in reversed(new_entries):
-                title_text = getattr(e, "title", "") or ""
-                
-                # مرحله ۱: تلاش برای خلاصه AI (مستقیماً summarize_full را صدا بزن)
-                parts = await self.summarizer.summarize_full(title_text, getattr(e, "summary", ""))
-                
-                # Check if the AI summary has meaningful content (tldr or bullets)
-                tldr = parts[0]
-                bullets = parts[1]
-                has_meaningful_summary = bool(tldr or bullets)
+                title_text = (getattr(e, "title", "") or "").strip()
+                link = getattr(e, "link", "") or ""
+                date = _fmt_date(e)
 
-                if has_meaningful_summary:
-                    # اگر خلاصه معنادار داشت، فرمت و ارسال کن
-                    date = _fmt_date(e)
-                    src_link = getattr(e, "link", "")
-                    msg = self._build_message_from_full(title_text, feed_title, date, {"tldr":tldr, "bullets":bullets, "opportunities":parts[2], "risks":parts[3], "signal":parts[4]}, src_link, lang=chat_lang)
-                    await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
-                    self.stats["sent"] += 1
-                    seen.add(eid)
-                    if reporter:
-                        reporter.record(url, "sent", extra="ai_summary")
-                    self.store.set_seen(cid_int, url, seen)
+                # 1) خلاصه AI — تلاش مستقیم برای summarize_full
+                entry_text = (getattr(e, "summary", "") or getattr(e, "description", "") or "").strip()
+                try:
+                    parts_tup = await self.summarizer.summarize_full(title_text, entry_text)
+                except Exception:
+                    LOG.debug("summarizer.summarize_full failed for %r", title_text, exc_info=True)
+                    parts_tup = ("", [], [], [], "")
+
+                parts_dict = {
+                    "tldr": parts_tup[0] or "",
+                    "bullets": parts_tup[1] or [],
+                    "opportunities": parts_tup[2] or [],
+                    "risks": parts_tup[3] or [],
+                    "signal": parts_tup[4] or "",
+                }
+
+                has_meaningful = bool(parts_dict["tldr"] or parts_dict["bullets"])
+
+                if has_meaningful:
+                    # stage 1 -> premium
+                    msg = render_premium(title_text, feed_title, date, parts_dict, link, lang=chat_lang)
+                    try:
+                        await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                        self.stats["sent"] += 1
+                        seen.add(eid)
+                        if reporter:
+                            reporter.record(url, "sent", extra="ai_premium")
+                        self.store.set_seen(cid_int, url, seen)
+                    except Exception:
+                        LOG.debug("send_message failed for ai_premium (cid=%s)", cid_int, exc_info=True)
                     continue
 
-                # مرحله ۲: اگر خلاصه معنادار نبود، وارد منطق فال‌بک شو
                 reason = "ai_empty_output"
                 self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
                 self.stats["skipped"] += 1
 
-                # ---------- throttle fallback per (chat, entry) ----------
                 throttle_sec = int(getattr(settings, "search_fallback_throttle_sec", 600))
                 last = self._fallback_cache.get((cid_int, eid), 0)
                 if time.time() - last < throttle_sec:
@@ -553,47 +569,68 @@ class RSSService:
                     continue
                 self._fallback_cache[(cid_int, eid)] = time.time()
 
-                # ---------- web-search fallback flow (همان کدی که قبلاً گذاشتی) ----------
+                sent_from_search = False
                 if title_text:
                     try:
                         search_items = await self._search_related(title_text, max_results=int(getattr(settings, "search_fallback_max_results", 3)))
                         if search_items:
                             agg = await self._build_text_from_search(search_items, max_chars=int(getattr(settings, "search_fallback_max_chars", 3500)))
-                            print("===== agg from search:", agg)
+                            LOG.debug("search fallback: agg length=%d for title=%r", len(agg or ""), title_text)
                             if agg:
                                 parts_search = await self._ai_summarize_full(title_text, agg)
-                                if (parts_search.get("tldr") or parts_search.get("bullets")):
-                                    date = _fmt_date(e)
-                                    src_link = getattr(e, "link", "") or (search_items[0].get("link") or "")
-                                    msg = self._build_message_from_full(title_text, feed_title, date, parts_search, src_link, lang=chat_lang)
-                                    await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
-                                    self.stats["sent"] += 1
-                                    seen.add(eid)
-                                    if reporter:
-                                        reporter.record(url, "sent", extra="web_fallback")
-                                    self.store.set_seen(cid_int, url, seen)
-                                    continue
+                                has_content = any([
+                                    parts_search.get("tldr"),
+                                    parts_search.get("bullets"),
+                                    parts_search.get("opportunities"),
+                                    parts_search.get("risks"),
+                                    parts_search.get("signal"),
+                                ])
+                                if has_content:
+                                    src_link = link or (search_items[0].get("link") or "")
+                                    msg = render_search_fallback(title_text, feed_title, date, parts_search, src_link, lang=chat_lang)
+                                    try:
+                                        await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                                        self.stats["sent"] += 1
+                                        seen.add(eid)
+                                        sent_from_search = True
+                                        if reporter:
+                                            reporter.record(url, "sent", extra="web_fallback")
+                                        self.store.set_seen(cid_int, url, seen)
+                                    except Exception:
+                                        LOG.debug("send_message failed for web_fallback (cid=%s)", cid_int, exc_info=True)
                     except Exception:
                         LOG.debug("search fallback failed for title=%r", title_text, exc_info=True)
 
-                if reporter:
-                    reporter.record(url, "skipped", reason=reason, extra="No summary after fallback")
-                continue
+                if sent_from_search:
+                    continue
 
+                try:
+                    draft_html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
+                except Exception:
+                    draft_html = None
 
-                # # ارسال پیام
-                # try:
-                #     await app.bot.send_message(chat_id=cid_int, text=html, parse_mode="HTML", disable_web_page_preview=True)
-                #     self.stats["sent"] += 1
-                #     seen.add(eid)
-                #     if reporter:
-                #         try: reporter.record(url, "sent")
-                #         except Exception: pass
-                # except Exception:
-                #     LOG.debug("send_message failed for %s (cid=%s)", url, cid_int, exc_info=True)
+                if draft_html and draft_html.strip():
+                    try:
+                        await app.bot.send_message(chat_id=cid_int, text=draft_html, parse_mode="HTML", disable_web_page_preview=True)
+                        self.stats["sent"] += 1
+                        seen.add(eid)
+                        if reporter:
+                            reporter.record(url, "sent", extra="title_only_from_formatter")
+                        self.store.set_seen(cid_int, url, seen)
+                    except Exception:
+                        LOG.debug("send_message failed for title_only (cid=%s)", cid_int, exc_info=True)
+                else:
+                    msg = render_title_only(title_text, feed_title, date, link, lang=chat_lang, translate_fn=_summary_translate,)  # تابع ترجمه از summary.py)
 
-            # ذخیره seen برای این چت و فید
-            # self.store.set_seen(cid_int, url, seen)
+                    try:
+                        await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                        self.stats["sent"] += 1
+                        seen.add(eid)
+                        if reporter:
+                            reporter.record(url, "sent", extra="title_only_min")
+                        self.store.set_seen(cid_int, url, seen)
+                    except Exception:
+                        LOG.debug("send_message failed for minimal title_only (cid=%s)", cid_int, exc_info=True)
 
         except Exception as ex:
             LOG.exception("process_feed error for %s (cid=%s): %s", url, cid_int, ex)

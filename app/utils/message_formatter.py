@@ -6,6 +6,9 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 import re
 from bs4 import BeautifulSoup
+import html
+import html as _html_mod
+from ..services.summary import _translate as translate_fn  # تابع ترجمه از summary.py
 
 # ---- i18n & settings (robust imports) ----------------------------------------
 try:
@@ -229,179 +232,247 @@ def _maybe_section(parts: List[str], items: List[str], label: str, lang: str, ca
     else:
         parts.extend([TEMPLATE_BULLET.format(b=esc(b)) for b in cleaned])
 
+# helper escapes 
+def html_escape(s: str) -> str:
+    if s is None:
+        return ""
+    return html.escape(str(s), quote=False)
 
-# ==== قالب‌ساز واحد: RSS Entry ====
-async def format_entry(
-    feed_title: str,
-    entry,
-    summarizer,
-    feed_url: str,
-    lang: Optional[str] = None,
-) -> str | None:
-    """
-    خروجی ۱۰۰٪ ثابت و یکدست (برای RSS):
-      [عنوان]
-      [منبع] | تاریخ
+def html_attr_escape(s: str) -> str:
+    if s is None:
+        return ""
+    return html.escape(str(s), quote=True)
 
-      🔰 لید
-      ✔️ بولت‌ها...
-      (🔺 فرصت‌ها…)
-      (🔻 ریسک‌ها…)
-      (📊 سیگنال…)
-      منبع(لینک)
+# ---------- renderers ----------
+def _labels_for_lang(lang: str) -> Dict[str, str]:
+    if (lang or "").lower().startswith("fa"):
+        return {
+            "premium_head": "💎 Insight+ Premium Edition Exclusive Access",
+            "key_points": "📊 نکات کلیدی",
+            "opportunities": "🔺 فرصت‌ها",
+            "risks": "🔻 ریسک‌ها",
+            "signal": "📊 سیگنال",
+            "source": "منبع",
+            "flash": "⚡ Flash | Quick View",
+            "anchor_source": "🔗",
+            "bullet_prefix": "✔️",
+        }
+    # default english labels
+    return {
+        "premium_head": "💎 Insight+ Premium Edition Exclusive Access",
+        "key_points": "📊 Key points",
+        "opportunities": "🔺 Opportunities",
+        "risks": "🔻 Risks",
+        "signal": "📊 Signal",
+        "source": "Source",
+        "flash": "⚡ Flash | Quick View",
+        "anchor_source": "🔗",
+        "bullet_prefix": "✔️",
+    }
 
-    اصل جدید: حتی اگر خلاصه‌سازی یا متن خام نداشتیم، حداقل «عنوان + لینک» ارسال می‌شود.
-    """
-    # زبان خلاصه: پارامتر → زبان پرامپت summarizer → پیش‌فرض fa
-    lang = (lang or getattr(summarizer, "prompt_lang", "fa") or "fa").lower()
+def render_premium(title: str, feed_title: str, date: str, parts: dict, src_link: str, lang: str = "fa") -> str:
+    L = _labels_for_lang(lang)
+    head = L["premium_head"]
+    safe_title = html_escape(title or "")
+    safe_feed = html_escape(feed_title or "")
+    meta = html_escape(date or "")
+    header = f"<b>{safe_title}</b>\n<i>{safe_feed}</i> | <i>{meta}</i>\n\n"
 
-    # 1) متادیتا
-    title = _clean_html(getattr(entry, "title", "") or "") or t("msg.untitled", lang)
-    link  = getattr(entry, "link", "") or ""
-    source_label = (feed_title or t("msg.source", lang)).strip()
-    date = _fmt_date(entry)
-    meta_line = TEMPLATE_META.format(source=esc(source_label), date=esc(date))
 
-    # 2) متن پایه (در صورت نبود، خلاصه‌سازی را جا می‌اندازیم اما پیام را می‌فرستیم)
-    raw = await _raw_from_entry(entry, link)
-
-    tldr = ""
-    bullets: List[str] = []
-    opps: List[str] = []
-    risks: List[str] = []
-    signal = ""
-
-    if raw:
-        # 3) خلاصه‌سازی منعطف
-        author = _author_of(entry) or None
-        data = await _summarize_flexible(summarizer, title=title, text=raw, author=author)
-        tldr = data.get("tldr") or ""
-        bullets = data.get("bullets") or []
-        opps = data.get("opportunities") or []
-        risks = data.get("risks") or []
-        signal = data.get("signal") or ""
-
-    # 4) اِعمال سقف‌ها
-    cap = int(getattr(settings, "summary_max_bullets", 4))
-    final_bullets = _cap_bullets(bullets, cap)
-    final_opps = _cap_section(opps, max(1, min(cap, 4)))
-    final_risks = _cap_section(risks, max(1, min(cap, 4)))
-    final_signal = (signal or "").strip()
-
-    # 5) ساخت پیام نهایی (HTML تلگرام) — همیشه حداقل عنوان+لینک
-    parts: List[str] = [TEMPLATE_TITLE.format(title=esc(title)), meta_line]
-
-    # اگر چیزی برای نمایش هست، سکشن‌ها را اضافه کن
+    body_lines: List[str] = []
+    tldr = (parts.get("tldr") or "").strip()
     if tldr:
-        parts += ["", TEMPLATE_LEAD.format(lead=esc(tldr)), ""]
-    if final_bullets:
-        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_bullets]
+        body_lines.append(f"🔰 {html_escape(tldr)}\n")
 
-    # برچسب‌های i18n (fallback ملایم)
-    lbl_opp = t("msg.opportunities", lang)
-    lbl_risk = t("msg.risks", lang)
-    lbl_signal = t("msg.signal", lang)
+    bullets = parts.get("bullets") or []
+    if bullets:
+        body_lines.append(f"\n{L['key_points']}")
+        for b in bullets:
+            body_lines.append(f"{L['bullet_prefix']} {html_escape(b)}")
 
-    if final_opps:
-        parts.append("")
-        parts.append(TEMPLATE_HEAD_OPP.format(label=esc(lbl_opp)))
-        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_opps]
+    opps = parts.get("opportunities") or []
+    if opps:
+        body_lines.append(f"\n{L['opportunities']}")
+        for o in opps:
+            body_lines.append(f"• {html_escape(o)}")
 
-    if final_risks:
-        parts.append("")
-        parts.append(TEMPLATE_HEAD_RISK.format(label=esc(lbl_risk)))
-        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_risks]
+    risks = parts.get("risks") or []
+    if risks:
+        body_lines.append(f"\n{L['risks']}")
+        for r in risks:
+            body_lines.append(f"• {html_escape(r)}")
 
-    if final_signal:
-        parts.append("")
-        parts.append(TEMPLATE_HEAD_SIGNAL.format(label=esc(lbl_signal)))
-        parts.append(TEMPLATE_SIGNAL_TEXT.format(text=esc(final_signal)))
+    sig = (parts.get("signal") or "").strip()
+    if sig:
+        body_lines.append(f"\n{L['signal']}")
+        body_lines.append(f"• {html_escape(sig)}")
 
-    if link:
-        parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
+    if src_link:
+        body_lines.append(f'\n<a href="{html_attr_escape(src_link)}">{L["anchor_source"]} {html_escape(L["source"])}</a>')
 
-    return "\n".join([p for p in parts if isinstance(p, str)]).strip()
+    # combine
+    return head + "\n" + "\n" + header + "\n".join([ln for ln in body_lines if ln is not None and str(ln).strip()]).strip() + "\n" + "\n" + head
 
-
-# ==== قالب‌ساز واحد: Page-Watch Article ====
-async def format_article(
-    feed_title: str,
-    title: str,
-    link: str,
-    text: str,
-    summarizer,
-    lang: Optional[str] = None,
-) -> str | None:
+def render_search_fallback(title: str, feed_title: str, date: str, parts: dict, src_link: str, lang: str = "fa") -> str:
     """
-    خروجی یکسان با RSS برای حالت Page-Watch (بدون تاریخ):
-      [عنوان]
-      [منبع] | (تاریخ خالی)
-
-      🔰 لید
-      ✔️ بولت‌ها...
-      (🔺 فرصت‌ها…)
-      (🔻 ریسک‌ها…)
-      (📊 سیگنال…)
-      منبع(لینک)
-
-    اصل جدید: حتی اگر خلاصه‌سازی یا متن خام نداشتیم، حداقل «عنوان + لینک» ارسال می‌شود.
+    قالب برای حالت فالبک سرچ (شبیه پرمیوم ولی ساده‌تر)
     """
-    lang = (lang or getattr(summarizer, "prompt_lang", "fa") or "fa").lower()
+    L = _labels_for_lang(lang)
+    safe_title = html_escape(title or "")
+    safe_feed = html_escape(feed_title or "")
+    meta = html_escape(date or "")
 
-    safe_title = _clean_html(title or "") or t("msg.untitled", lang)
-    source_label = (feed_title or t("msg.source", lang)).strip()
-    date = ""  # در Page-Watch معمولاً تاریخ RSS نداریم
-    meta_line = TEMPLATE_META.format(source=esc(source_label), date=esc(date))
+    header = f"{safe_title}\n{safe_feed} | {meta}\n\n"
 
-    raw = (text or "").strip()
+    lines: List[str] = []
 
-    tldr = ""
-    bullets: List[str] = []
-    opps: List[str] = []
-    risks: List[str] = []
-    signal = ""
-
-    if raw:
-        data = await _summarize_flexible(summarizer, title=safe_title, text=raw, author=None)
-        tldr = data.get("tldr") or ""
-        bullets = data.get("bullets") or []
-        opps = data.get("opportunities") or []
-        risks = data.get("risks") or []
-        signal = data.get("signal") or ""
-
-    cap = int(getattr(settings, "summary_max_bullets", 4))
-    final_bullets = _cap_bullets(bullets, cap)
-    final_opps = _cap_section(opps, max(1, min(cap, 4)))
-    final_risks = _cap_section(risks, max(1, min(cap, 4)))
-    final_signal = (signal or "").strip()
-
-    parts: List[str] = [TEMPLATE_TITLE.format(title=esc(safe_title)), meta_line]
-
+    tldr = (parts.get("tldr") or "").strip()
     if tldr:
-        parts += ["", TEMPLATE_LEAD.format(lead=esc(tldr)), ""]
-    if final_bullets:
-        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_bullets]
+        lines.append(f"🔰 {html_escape(tldr)}\n")
 
-    lbl_opp = t("msg.opportunities", lang)
-    lbl_risk = t("msg.risks", lang)
-    lbl_signal = t("msg.signal", lang)
+    bullets = parts.get("bullets") or []
+    for b in bullets:
+        lines.append(f"📌 {html_escape(b)}")
 
-    if final_opps:
-        parts.append("")
-        parts.append(TEMPLATE_HEAD_OPP.format(label=esc(lbl_opp)))
-        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_opps]
+    sig = (parts.get("signal") or "").strip()
+    if sig:
+        lines.append(f"\n📊 {L['signal']}")
+        lines.append(f"• {html_escape(sig)}")
 
-    if final_risks:
-        parts.append("")
-        parts.append(TEMPLATE_HEAD_RISK.format(label=esc(lbl_risk)))
-        parts += [TEMPLATE_BULLET.format(b=esc(b)) for b in final_risks]
+    if src_link:
+        lines.append(f'\n🔗 <a href="{html_attr_escape(src_link)}">{L["source"]}</a>')
 
-    if final_signal:
-        parts.append("")
-        parts.append(TEMPLATE_HEAD_SIGNAL.format(label=esc(lbl_signal)))
-        parts.append(TEMPLATE_SIGNAL_TEXT.format(text=esc(final_signal)))
+    lines.append(f"\n📝 KeyNotes | Executive Summary")
 
-    if link:
-        parts.append(f'\n<a href="{esc_attr(link)}">{esc(t("msg.source", lang))}</a>')
+    return header + "\n".join([ln for ln in lines if ln and str(ln).strip()]).strip()
 
-    return "\n".join([p for p in parts if isinstance(p, str)]).strip()
+def render_title_only(
+        title: str,
+        feed_title: str,
+        date: str,
+        src_link: str,
+        lang: str = "fa",
+    ) -> str:    
+    """
+    قالب مرحله 3 — فقط عنوان و منبع (کمینه)
+    خروجی مشابه نمونه:
+    
+    AI Breakthrough Promises Faster Drug Discovery
+    Tech Insider | 2025-09-07
+
+    📌 پژوهشگران ...
+    
+    🔗 [منبع]
+    ⚡ Flash | Quick View
+    """
+    try:
+        _html_escape = html_escape 
+    except NameError:
+        _html_escape = _html_mod.escape
+
+    try:
+        _html_attr_escape = html_attr_escape
+    except NameError:
+        _html_attr_escape = _html_mod.escape
+
+    if "_labels_for_lang" in globals():
+        L = _labels_for_lang(lang)
+    else:
+        if (lang or "").lower().startswith("fa"):
+            L = {
+                "source": "منبع",
+                "flash_footer": "⚡ Flash | Quick View",
+                "anchor_source": "🔗",
+            }
+        else:
+            L = {
+                "source": "Source",
+                "flash_footer": "⚡ Flash | Quick View",
+                "anchor_source": "🔗",
+            }
+
+    safe_title = _html_escape(title or "")
+    safe_feed = _html_escape(feed_title or "")
+    safe_meta = _html_escape(date or "")
+
+    header = f"<b>{safe_title}</b>\n<i>{safe_feed}</i> | <i>{safe_meta}</i>\n\n"
+
+
+    translated_content_title = ""
+    if translate_fn and callable(translate_fn):
+        try:
+            maybe = translate_fn(title or "", (lang or "").split("-")[0])
+            if maybe and isinstance(maybe, str):
+                translated_content_title = maybe.strip()
+        except Exception:
+            translated_content_title = ""
+
+    # if translation not produced, use original title as content
+    # content_title = translated_content_title or (title or "")
+
+    safe_content_title = _html_escape(translated_content_title)
+
+    content_line = f"📌 {safe_content_title}\n\n"
+
+    src_line = ""
+    if src_link:
+        src_line = f'<a href="{_html_attr_escape(src_link)}">{_html_escape(L.get("anchor_source","🔗"))} {_html_escape(L.get("source","Source"))}</a>\n'
+
+    footer = L.get("flash_footer", "⚡ Flash | Quick View")
+
+    return header + content_line + src_line + "\n" + footer
+
+# ---------- convenience small-format helpers used by RSS as fallback ----------
+async def format_entry(feed_title: str, entry: Any, summarizer, url: str, lang: str = "fa") -> Optional[str]:
+    try:
+        title = (getattr(entry, "title", "") or "").strip()
+        text = (getattr(entry, "summary", "") or getattr(entry, "description", "") or "").strip()
+        if not text and getattr(entry, "link", None):
+            text = title
+
+        parts = None
+        sfn = getattr(summarizer, "summarize", None)
+        if callable(sfn):
+            try:
+                tldr, bullets = await sfn(title=title, text=text)
+                parts = {"tldr": tldr or "", "bullets": bullets or []}
+            except Exception:
+                parts = {"tldr": "", "bullets": []}
+
+        date = _fmt_date(entry)
+        link = getattr(entry, "link", "") or url
+
+        if parts and (parts.get("tldr") or parts.get("bullets")):
+            return render_search_fallback(title, feed_title, date, parts, link, lang=lang)
+
+        return render_title_only(title, feed_title, date, link, lang=lang)
+    except Exception:
+        return None
+
+async def format_article(feed_title: str, title: str, link: str, text: str, summarizer, lang: str = "fa") -> Optional[str]:
+    try:
+        sfn = getattr(summarizer, "summarize_full", None)
+        parts = None
+        if callable(sfn):
+            try:
+                tup = await sfn(title=title, text=text)
+                parts = {
+                    "tldr": tup[0] or "",
+                    "bullets": tup[1] or [],
+                    "opportunities": tup[2] or [],
+                    "risks": tup[3] or [],
+                    "signal": tup[4] or "",
+                }
+            except Exception:
+                parts = {"tldr": "", "bullets": [], "opportunities": [], "risks": [], "signal": ""}
+
+        date = ""
+        if getattr(title, "published_parsed", None):
+            date = _fmt_date(title)  
+
+        if parts and (parts.get("tldr") or parts.get("bullets")):
+            return render_premium(title, feed_title, date, parts, link, lang=lang)
+
+        return render_title_only(title, feed_title, date, link, lang=lang)
+    except Exception:
+        return None

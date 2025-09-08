@@ -312,10 +312,7 @@ class Summarizer:
 
         if not (genai and self.api_key):
             LOG.debug("summarize_full: no genai or api key")
-            # اگر کماکان میخوایم حتما AI باشه بدون fallback، return خالی:
-            # return "", [], [], [], ""
-            # اما برای جلوگیری از پیام‌های کاملا خالی، یه tldr‌ کوتاه از عنوان بساز:
-            return (title[:200] or ""), [], [], [], ""
+            return "", [], [], [], ""
 
         try:
             api_key = get_gemini_key()
@@ -354,13 +351,10 @@ class Summarizer:
             + f"Title: {title}\nContent:\n{(base or '')[:max_input]}"
         )
 
-        # ترتیب تلاش: strict → softer → unstructured → tldr only → bullets only
         prompt_sequence = [strict_json_prompt, softer_prompt, unstructured_prompt]
         if len(base) < short_threshold:
-            # برای خیلی کوتاه‌ها اضافه کن
             prompt_sequence.append(just_tldr_prompt)
             prompt_sequence.append(just_bullets_prompt)
-        # محدود کن بر اساس max_attempts
         prompt_sequence = prompt_sequence[:max_attempts]
 
         raw_collected = ""
@@ -424,7 +418,6 @@ class Summarizer:
                 continue
             raw_collected = raw
             parsed = extract_from_raw(raw)
-            # قبول کن اگر حداقل tldr یا bullets داریم
             if (
                 parsed.get("tldr")
                 or parsed.get("bullets")
@@ -439,9 +432,7 @@ class Summarizer:
                     list(parsed.keys()),
                 )
                 break
-            # اگر JSON داشت ولی خالی، ادامه بده تا تلاش بعدی
 
-        # اگر باز هم parsed خالی، تلاش آخر: یک prompt بسیار ساده برای tldr
         if not parsed_obj:
             raw = await _call_ai(model, just_tldr_prompt)
             parsed = extract_from_raw(raw)
@@ -449,19 +440,13 @@ class Summarizer:
                 parsed_obj = parsed
                 LOG.debug("summarize_full: got fallback tldr/bullets")
 
-        # اگر کاملاً خالیه، از raw_collected یک tldr کوتاه جورش کن
-        # اگر کاملاً خالیه، از raw_collected یک tldr کوتاه جورش کن
         if not parsed_obj:
             if raw_collected:
                 parsed_obj = extract_from_raw(raw_collected)
+            else:
+                return "", [], [], [], ""
 
-        # اگر همچنان خلاصه‌ای نداریم، عنوان را به عنوان TLDR قرار بده.
-        tldr_fallback = ""
-        if not parsed_obj.get("tldr") and title:
-            tldr_fallback = (title[:300] or "").strip()
-
-        # نرمالایز خروجی
-        tldr = (parsed_obj.get("tldr") or tldr_fallback).strip()
+        tldr = (parsed_obj.get("tldr") or "").strip()
         bullets = [x for x in (parsed_obj.get("bullets") or []) if isinstance(x, str)]
         opportunities = [
             x for x in (parsed_obj.get("opportunities") or []) if isinstance(x, str)
@@ -488,7 +473,6 @@ class Summarizer:
         opportunities = _dedupe_cap(opportunities, cap=opp_cap)
         risks = _dedupe_cap(risks, cap=risk_cap)
 
-        # enforce language
         try:
             tldr, bullets, opportunities, risks, signal = _force_lang_full(
                 tldr, bullets, opportunities, risks, signal, self.prompt_lang
