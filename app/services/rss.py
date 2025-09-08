@@ -504,8 +504,10 @@ class RSSService:
                     await app.bot.send_message(chat_id=cid_int, text=html, parse_mode="HTML", disable_web_page_preview=True)
                     self.stats["sent"] += 1
                     if reporter:
-                        try: reporter.record(url, "sent")
-                        except Exception: pass
+                        try:
+                            reporter.record(url, "sent")
+                        except Exception:
+                            pass
                 return
 
             # معمولی: بررسی ورودی‌ها و ارسال پیام‌ها
@@ -524,6 +526,8 @@ class RSSService:
                 title_text = (getattr(e, "title", "") or "").strip()
                 link = getattr(e, "link", "") or ""
                 date = _fmt_date(e)
+
+                sent_ok = False  # <-- پرچم اینکه آیا چیزی ارسال شد یا نه
 
                 # 1) خلاصه AI — تلاش مستقیم برای summarize_full
                 entry_text = (getattr(e, "summary", "") or getattr(e, "description", "") or "").strip()
@@ -544,96 +548,93 @@ class RSSService:
                 has_meaningful = bool(parts_dict["tldr"] or parts_dict["bullets"])
 
                 if has_meaningful:
-                    # stage 1 -> premium
                     msg = render_premium(title_text, feed_title, date, parts_dict, link, lang=chat_lang)
                     try:
                         await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
                         self.stats["sent"] += 1
                         seen.add(eid)
+                        sent_ok = True
                         if reporter:
                             reporter.record(url, "sent", extra="ai_premium")
                         self.store.set_seen(cid_int, url, seen)
                     except Exception:
                         LOG.debug("send_message failed for ai_premium (cid=%s)", cid_int, exc_info=True)
-                    continue
 
-                reason = "ai_empty_output"
-                self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
-                self.stats["skipped"] += 1
+                # 2) اگر مرحله اول چیزی نداد → fallback سرچ
+                if not sent_ok and title_text:
+                    throttle_sec = int(getattr(settings, "search_fallback_throttle_sec", 600))
+                    last = self._fallback_cache.get((cid_int, eid), 0)
+                    if time.time() - last >= throttle_sec:
+                        self._fallback_cache[(cid_int, eid)] = time.time()
+                        try:
+                            search_items = await self._search_related(title_text, max_results=int(getattr(settings, "search_fallback_max_results", 3)))
+                            if search_items:
+                                agg = await self._build_text_from_search(search_items, max_chars=int(getattr(settings, "search_fallback_max_chars", 3500)))
+                                LOG.debug("search fallback: agg length=%d for title=%r", len(agg or ""), title_text)
+                                if agg:
+                                    parts_search = await self._ai_summarize_full(title_text, agg)
+                                    has_content = any([
+                                        parts_search.get("tldr"),
+                                        parts_search.get("bullets"),
+                                        parts_search.get("opportunities"),
+                                        parts_search.get("risks"),
+                                        parts_search.get("signal"),
+                                    ])
+                                    if has_content:
+                                        src_link = link or (search_items[0].get("link") or "")
+                                        msg = render_search_fallback(title_text, feed_title, date, parts_search, src_link, lang=chat_lang)
+                                        try:
+                                            await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                                            self.stats["sent"] += 1
+                                            seen.add(eid)
+                                            sent_ok = True
+                                            if reporter:
+                                                reporter.record(url, "sent", extra="web_fallback")
+                                            self.store.set_seen(cid_int, url, seen)
+                                        except Exception:
+                                            LOG.debug("send_message failed for web_fallback (cid=%s)", cid_int, exc_info=True)
+                        except Exception:
+                            LOG.debug("search fallback failed for title=%r", title_text, exc_info=True)
 
-                throttle_sec = int(getattr(settings, "search_fallback_throttle_sec", 600))
-                last = self._fallback_cache.get((cid_int, eid), 0)
-                if time.time() - last < throttle_sec:
-                    if reporter:
-                        reporter.record(url, "skipped", reason=reason, extra="fallback_throttled")
-                    continue
-                self._fallback_cache[(cid_int, eid)] = time.time()
-
-                sent_from_search = False
-                if title_text:
+                # 3) اگر مرحله دوم هم چیزی نداد → title-only
+                if not sent_ok:
                     try:
-                        search_items = await self._search_related(title_text, max_results=int(getattr(settings, "search_fallback_max_results", 3)))
-                        if search_items:
-                            agg = await self._build_text_from_search(search_items, max_chars=int(getattr(settings, "search_fallback_max_chars", 3500)))
-                            LOG.debug("search fallback: agg length=%d for title=%r", len(agg or ""), title_text)
-                            if agg:
-                                parts_search = await self._ai_summarize_full(title_text, agg)
-                                has_content = any([
-                                    parts_search.get("tldr"),
-                                    parts_search.get("bullets"),
-                                    parts_search.get("opportunities"),
-                                    parts_search.get("risks"),
-                                    parts_search.get("signal"),
-                                ])
-                                if has_content:
-                                    src_link = link or (search_items[0].get("link") or "")
-                                    msg = render_search_fallback(title_text, feed_title, date, parts_search, src_link, lang=chat_lang)
-                                    try:
-                                        await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
-                                        self.stats["sent"] += 1
-                                        seen.add(eid)
-                                        sent_from_search = True
-                                        if reporter:
-                                            reporter.record(url, "sent", extra="web_fallback")
-                                        self.store.set_seen(cid_int, url, seen)
-                                    except Exception:
-                                        LOG.debug("send_message failed for web_fallback (cid=%s)", cid_int, exc_info=True)
+                        draft_html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
                     except Exception:
-                        LOG.debug("search fallback failed for title=%r", title_text, exc_info=True)
+                        draft_html = None
 
-                if sent_from_search:
-                    continue
+                    if draft_html and draft_html.strip():
+                        try:
+                            await app.bot.send_message(chat_id=cid_int, text=draft_html, parse_mode="HTML", disable_web_page_preview=True)
+                            self.stats["sent"] += 1
+                            seen.add(eid)
+                            sent_ok = True
+                            if reporter:
+                                reporter.record(url, "sent", extra="title_only_from_formatter")
+                            self.store.set_seen(cid_int, url, seen)
+                        except Exception:
+                            LOG.debug("send_message failed for title_only (cid=%s)", cid_int, exc_info=True)
+                    else:
+                        msg = render_title_only(title_text, feed_title, date, link, lang=chat_lang, translate_fn=_summary_translate,)
+                        try:
+                            await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
+                            self.stats["sent"] += 1
+                            seen.add(eid)
+                            sent_ok = True
+                            if reporter:
+                                reporter.record(url, "sent", extra="title_only_min")
+                            self.store.set_seen(cid_int, url, seen)
+                        except Exception:
+                            LOG.debug("send_message failed for minimal title_only (cid=%s)", cid_int, exc_info=True)
 
-                try:
-                    draft_html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
-                except Exception:
-                    draft_html = None
-
-                if draft_html and draft_html.strip():
-                    try:
-                        await app.bot.send_message(chat_id=cid_int, text=draft_html, parse_mode="HTML", disable_web_page_preview=True)
-                        self.stats["sent"] += 1
-                        seen.add(eid)
-                        if reporter:
-                            reporter.record(url, "sent", extra="title_only_from_formatter")
-                        self.store.set_seen(cid_int, url, seen)
-                    except Exception:
-                        LOG.debug("send_message failed for title_only (cid=%s)", cid_int, exc_info=True)
-                else:
-                    msg = render_title_only(title_text, feed_title, date, link, lang=chat_lang, translate_fn=_summary_translate,)  # تابع ترجمه از summary.py)
-
-                    try:
-                        await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
-                        self.stats["sent"] += 1
-                        seen.add(eid)
-                        if reporter:
-                            reporter.record(url, "sent", extra="title_only_min")
-                        self.store.set_seen(cid_int, url, seen)
-                    except Exception:
-                        LOG.debug("send_message failed for minimal title_only (cid=%s)", cid_int, exc_info=True)
+                # اگر هیچ‌کدوم جواب نداد → skip
+                if not sent_ok:
+                    self.stats["skipped"] += 1
+                    self.stats["reasons"]["ai_empty_output"] = self.stats["reasons"].get("ai_empty_output", 0) + 1
 
         except Exception as ex:
             LOG.exception("process_feed error for %s (cid=%s): %s", url, cid_int, ex)
+            
 
     # ------------------------------------------------------------------ #
     # Main poll
