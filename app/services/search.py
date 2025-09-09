@@ -9,7 +9,7 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 from ..utils.text import root_url, ensure_scheme
 
@@ -45,6 +45,57 @@ class SearchService:
     def __init__(self, serper_key: Optional[str], default_lang: str = "fa"):
         self.serper_key = (serper_key or "").strip()
         self.default_lang = (default_lang or "fa").lower()
+        self.endpoint = "https://google.serper.dev/search"
+
+    async def search(self, query: str, max_results: int = 3) -> List[dict]:
+        """
+        جستجوی ساده برای متن (برای fallback مرحله دوم).
+        خروجی: لیست دیکشنری‌ها با کلیدهای link/title/snippet
+        """
+        if not query:
+            return []
+
+        # اولویت ۱ → Serper API (اگر کلید داری)
+        if self.serper_key:
+            try:
+                async with httpx.AsyncClient(
+                    timeout=self._DISC_TIMEOUT,
+                    headers={"X-API-KEY": self.serper_key, "User-Agent": self._UA},
+                ) as c:
+                    payload = {"q": query, "num": max_results, "hl": "en", "gl": "us"}
+                    r = await c.post(self.endpoint, json=payload)
+                    if r.status_code == 200:
+                        data = r.json()
+                        organic = data.get("organic", []) or []
+                        out = []
+                        for item in organic[:max_results]:
+                            out.append({
+                                "link": item.get("link"),
+                                "title": item.get("title"),
+                                "snippet": item.get("snippet", ""),
+                            })
+                        return out
+            except Exception as ex:
+                print("⚠️ serper search failed:", ex)
+
+        # اولویت ۲ → DuckDuckGo fallback
+        try:
+            def _do():
+                with DDGS() as ddgs:
+                    return list(ddgs.text(query, region="us-en", safesearch="moderate", max_results=max_results))
+
+            res = await asyncio.to_thread(_do)
+            out = []
+            for r in res:
+                out.append({
+                    "link": r.get("href") or r.get("link") or r.get("url"),
+                    "title": r.get("title") or "",
+                    "snippet": r.get("body") or "",
+                })
+            return out
+        except Exception as ex:
+            print("⚠️ ddg search failed:", ex)
+            return []
 
     # --------------------------------------------------------------------- #
     # جستجوی موضوعی سایت‌ها (برای استفاده‌های آتی / سازگار با نسخهٔ قبل)
@@ -287,3 +338,26 @@ class SearchService:
 
         ordered.sort(key=score, reverse=True)
         return ordered[0]
+    
+# Search
+class SerperSearch:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+        self.endpoint = "https://google.serper.dev/search"
+
+    async def search(self, query: str, max_results: int = 3):
+        headers = {"X-API-KEY": self.api_key, "Content-Type": "application/json"}
+        payload = {"q": query}
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(self.endpoint, headers=headers, json=payload)
+            data = resp.json()
+
+        out = []
+        for item in data.get("organic", [])[:max_results]:
+            out.append({
+                "link": item.get("link"),
+                "title": item.get("title"),
+                "snippet": item.get("snippet", "")
+            })
+        return out
+

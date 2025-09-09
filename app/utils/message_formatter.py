@@ -322,7 +322,7 @@ def render_search_fallback(title: str, feed_title: str, date: str, parts: dict, 
     safe_feed = html_escape(feed_title or "")
     meta = html_escape(date or "")
 
-    header = f"{safe_title}\n{safe_feed} | {meta}\n\n"
+    header = f"<b>{safe_title}</b>\n<i>{safe_feed}</i> | <i>{meta}</i>\n\n"
 
     lines: List[str] = []
 
