@@ -7,7 +7,7 @@ from telegram import BotCommand
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from .config import settings
-from .storage.state import StateStore
+from .storage.state import StateStore, SQLiteStateStore
 from .services.summary import Summarizer, get_gemini_key
 from .services.search import SearchService
 from .services.rss import RSSService
@@ -86,7 +86,7 @@ def build_app() -> Application:
     app: Application = Application.builder().token(settings.telegram_token).build()
 
     # ---- سرویس‌ها
-    store = StateStore(getattr(settings, "state_file", "subs.json"))
+    store = SQLiteStateStore(getattr(settings, "state_db", "state.db"))
     summarizer = Summarizer(
         api_key=get_gemini_key(),
         prompt_lang=getattr(settings, "prompt_lang", "fa"),

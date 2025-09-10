@@ -9,7 +9,10 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
+
 from ddgs import DDGS
+# from duckduckgo_search import DDGS
+
 
 from ..utils.text import root_url, ensure_scheme
 

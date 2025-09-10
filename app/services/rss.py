@@ -533,10 +533,9 @@ class RSSService:
                 entry_text = (getattr(e, "summary", "") or getattr(e, "description", "") or "").strip()
                 try:
                     parts_tup = await self.summarizer.summarize_full(title_text, entry_text)
-                except Exception:
-                    LOG.debug("summarizer.summarize_full failed for %r", title_text, exc_info=True)
+                except Exception as ex:
                     parts_tup = ("", [], [], [], "")
-
+                    
                 parts_dict = {
                     "tldr": parts_tup[0] or "",
                     "bullets": parts_tup[1] or [],

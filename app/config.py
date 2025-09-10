@@ -122,9 +122,10 @@ class Settings:
     search_fallback_max_results = 3
     search_fallback_max_chars = 3500
     fetcher_concurrency = 4
-
-
     
+    # DB
+    state_db = os.getenv("STATE_DB", "state.db")
+
     # --- Ephemeral Messages ---
     ephemeral_mode: bool = _get_bool("EPHEMERAL_MODE", True)
     ephemeral_delete_sec: int = _get_int("EPHEMERAL_DELETE_SEC", 5)

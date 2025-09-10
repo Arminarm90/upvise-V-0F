@@ -317,6 +317,8 @@ class Summarizer:
         try:
             api_key = get_gemini_key()
             genai.configure(api_key=api_key)
+            print("🔑 Gemini using key===", api_key)
+
             model = genai.GenerativeModel(settings.summary_model_name)
         except Exception as ex:
             LOG.exception("summarize_full: model init failed: %s", ex)
