@@ -9,7 +9,10 @@ from bs4 import BeautifulSoup
 import html
 import html as _html_mod
 from ..services.summary import _translate as translate_fn  # تابع ترجمه از summary.py
-
+try:
+    from deep_translator import GoogleTranslator as _GT
+except Exception:
+    _GT = None
 # ---- i18n & settings (robust imports) ----------------------------------------
 try:
     # مسیر استاندارد پروژه
@@ -346,6 +349,38 @@ def render_search_fallback(title: str, feed_title: str, date: str, parts: dict, 
 
     return header + "\n".join([ln for ln in lines if ln and str(ln).strip()]).strip()
 
+# translate for title only
+def _clean_title_for_translate(title: str) -> str:
+    if not title:
+        return ""
+    if " - " in title:
+        return title.split(" - ")[0].strip()
+    return title.strip()
+
+def _smart_translate_title(title: str, lang: str) -> str:
+    """ترجمه بهتر عنوان: کوتاه‌سازی → ترجمه → پاکسازی"""
+    if not title or not lang or not _GT:
+        return title or ""
+    try:
+        # --- مرحله ۱: کوتاه‌سازی به 100 کاراکتر یا جمله اول ---
+        sentences = re.split(r"[.!؟\?]", title)
+        base = sentences[0].strip() if sentences else title.strip()
+        if len(base) > 100:
+            base = base[:100]
+
+        # --- مرحله ۲: ترجمه ---
+        base = _clean_title_for_translate(title)
+        translated = _GT(source="auto", target=lang).translate(base).strip()
+
+        # --- مرحله ۳: پاکسازی ---
+        translated = re.sub(r"\s+", " ", translated)
+        if not translated or translated.lower() == base.lower():
+            return title  # اگر ترجمه بی‌کیفیت بود، متن اصلی را نگه دار
+
+        return translated
+    except Exception:
+        return title or ""
+
 def render_title_only(
         title: str,
         feed_title: str,
@@ -401,7 +436,7 @@ def render_title_only(
     translated_content_title = ""
     if translate_fn and callable(translate_fn):
         try:
-            maybe = translate_fn(title or "", (lang or "").split("-")[0])
+            maybe = _smart_translate_title(title or "", (lang or "").split("-")[0])
             if maybe and isinstance(maybe, str):
                 translated_content_title = maybe.strip()
         except Exception:

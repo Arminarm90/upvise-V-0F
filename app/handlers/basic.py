@@ -58,6 +58,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_full_name = update.effective_user.full_name or update.effective_user.first_name
     user_username = getattr(update.effective_user, "username", None)
     store.register_user(chat_id, user_full_name, username=user_username)
+    store.mark_action(chat_id)
 
     lang = get_chat_lang(store, chat_id)
 
@@ -70,8 +71,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    store = ctx.bot_data["store"]
     lang = get_chat_lang(ctx.bot_data["store"], chat_id)
-
+    store.mark_action(chat_id)
     msg = t("help.text", lang)
     sent = await update.effective_message.reply_text(
         msg, parse_mode="HTML", disable_web_page_preview=True

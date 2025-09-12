@@ -120,7 +120,7 @@ async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     store = context.bot_data.get("store")
     lang = get_chat_lang(store, chat_id) if store else "fa"
-
+    store.mark_action(chat_id)
     feeds = _read_feeds(context, chat_id)
     text, kb = _render_page(feeds, page=1, lang=lang)
 

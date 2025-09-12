@@ -28,7 +28,7 @@ async def cmd_lang(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     store = ctx.bot_data["store"]
     chat_id = update.effective_chat.id
     lang = get_chat_lang(store, chat_id)
-
+    store.mark_action(chat_id)
     kb = InlineKeyboardMarkup(
         [[
             InlineKeyboardButton(t("btn.fa", lang), callback_data="lang:fa"),

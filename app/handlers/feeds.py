@@ -94,6 +94,7 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     try:
         if await rss.is_valid_feed(site):
             if store.add_feed(chat_id, site):
+                store.mark_action(chat_id)
                 m = await update.effective_message.reply_text(t("add.added_feed", lang))
             else:
                 m = await update.effective_message.reply_text(t("add.already_added", lang))
@@ -117,6 +118,7 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         try:
             if await rss.is_valid_feed(best):
                 if store.add_feed(chat_id, best):
+                    store.mark_action(chat_id)
                     m = await update.effective_message.reply_text(t("add.feed_found_added", lang))
                 else:
                     m = await update.effective_message.reply_text(t("add.already_added", lang))
@@ -129,6 +131,7 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     # 3) اگر RSS پیدا نشد یا معتبر نبود → Page-Watch روی خود سایت
     try:
         if store.add_feed(chat_id, site):
+            store.mark_action(chat_id)
             m = await update.effective_message.reply_text(t("add.pagewatch_enabled", lang))
         else:
             m = await update.effective_message.reply_text(t("add.already_added", lang))

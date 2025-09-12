@@ -195,55 +195,27 @@ from typing import Dict, List, Tuple, Iterable, Any, Optional
 DEFAULT_DB = os.getenv("STATE_DB", "state.db")
 
 
+# app/storage/state_sqlite.py
+# -*- coding: utf-8 -*-
+import sqlite3
+import threading
+import json
+import os
+from typing import Dict, List, Tuple, Iterable, Any, Optional
+
+DEFAULT_DB = os.getenv("STATE_DB", "state.db")
+
+
 class SQLiteStateStore:
     def __init__(self, db_path: str = DEFAULT_DB):
         self.db_path = db_path
+        # allow multithreaded access from async contexts
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+        # return rows as dict-like
         self.conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
         self._init_schema()
 
-    def _init_schema(self) -> None:
-        with self._locked_cursor() as cur:
-            cur.execute("PRAGMA journal_mode=WAL;")
-            cur.execute("PRAGMA foreign_keys=ON;")
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS chats (
-                    chat_id TEXT PRIMARY KEY,
-                    name TEXT,
-                    username TEXT UNIQUE COLLATE NOCASE,
-                    lang TEXT DEFAULT 'en'
-                )
-                """
-            )
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_chats_username ON chats(username);")
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS feeds (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id TEXT NOT NULL,
-                    url TEXT NOT NULL,
-                    UNIQUE(chat_id, url),
-                    FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
-                )
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS seen (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    chat_id TEXT NOT NULL,
-                    feed_url TEXT NOT NULL,
-                    item_id TEXT NOT NULL,
-                    UNIQUE(chat_id, feed_url, item_id),
-                    FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
-                )
-                """
-            )
-            self.conn.commit()
-
-    # --------------- helpers ---------------
     def _locked_cursor(self):
         """Context manager that acquires lock and yields cursor."""
         class Ctx:
@@ -272,6 +244,76 @@ class SQLiteStateStore:
 
         return Ctx(self)
 
+    def _init_schema(self) -> None:
+        """
+        Create base tables and ensure new columns exist (migration-safe).
+        New fields:
+          - chats.first_seen TEXT (timestamp when user first registered)
+          - chats.last_action TEXT (last action timestamp)
+          - chats.feeds_history TEXT (JSON array of all feeds ever added by user)
+        """
+        with self._locked_cursor() as cur:
+            # PRAGMAs for better concurrency and safety
+            cur.execute("PRAGMA journal_mode=WAL;")
+            cur.execute("PRAGMA foreign_keys=ON;")
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chats (
+                    chat_id TEXT PRIMARY KEY,
+                    name TEXT,
+                    username TEXT UNIQUE COLLATE NOCASE,
+                    lang TEXT DEFAULT 'en'
+                )
+                """
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_chats_username ON chats(username);")
+
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS feeds (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    UNIQUE(chat_id, url),
+                    FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS seen (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    feed_url TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    UNIQUE(chat_id, feed_url, item_id),
+                    FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+                )
+                """
+            )
+            self.conn.commit()
+
+            cur.execute("PRAGMA table_info(chats);")
+            cols = [r["name"] for r in cur.fetchall()]
+            if "first_seen" not in cols:
+                try:
+                    cur.execute("ALTER TABLE chats ADD COLUMN first_seen TEXT;")
+                except Exception:
+                    pass
+            if "last_action" not in cols:
+                try:
+                    cur.execute("ALTER TABLE chats ADD COLUMN last_action TEXT;")
+                except Exception:
+                    pass
+            if "feeds_history" not in cols:
+                try:
+                    cur.execute("ALTER TABLE chats ADD COLUMN feeds_history TEXT DEFAULT '[]';")
+                except Exception:
+                    pass
+
+            self.conn.commit()
+
     # ---------------- normalize username ----------------
     def _normalize_username(self, username: Optional[str]) -> Optional[str]:
         """Ensure username stored like '@name' and lowercase (or None)."""
@@ -285,27 +327,57 @@ class SQLiteStateStore:
         s = s.lower()
         return "@" + s
 
-    # --------------- core chat operations ---------------
+    # ---------------- time helper ----------------
+    def _now_sql(self) -> str:
+        from datetime import datetime
+        return datetime.utcnow().isoformat(timespec='seconds')
+
+    # ---------------- core chat operations ---------------
     def register_user(self, chat_id: int | str, name: str, username: Optional[str] = None, lang: str = "en") -> None:
-        """Insert chat row if missing. Optionally store username and lang."""
         cid = str(chat_id)
         uname = self._normalize_username(username)
         with self._locked_cursor() as cur:
-            cur.execute(
-                "INSERT OR IGNORE INTO chats(chat_id, name, username, lang) VALUES(?, ?, ?, ?)",
-                (cid, name or None, uname, lang or "en"),
-            )
+            # check existence
+            cur.execute("SELECT 1 FROM chats WHERE chat_id = ?", (cid,))
+            if not cur.fetchone():
+                cur.execute(
+                    """
+                    INSERT INTO chats(chat_id, name, username, lang, first_seen, last_action, feeds_history)
+                    VALUES(?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?)
+                    """,
+                    (cid, name or None, uname, lang or "en", json.dumps([])),
+                )
+            else:
+                # chat exists: update name/lang/username if provided (do not touch first_seen)
+                if name is not None or uname is not None or lang is not None:
+                    cur.execute(
+                        """
+                        UPDATE chats
+                        SET name = COALESCE(?, name),
+                            username = COALESCE(?, username),
+                            lang = COALESCE(?, lang)
+                        WHERE chat_id = ?
+                        """,
+                        (name, uname, lang, cid),
+                    )
 
     def get_chat(self, chat_id: int | str) -> dict:
         cid = str(chat_id)
         with self._locked_cursor() as cur:
-            cur.execute("SELECT chat_id, name, username, lang FROM chats WHERE chat_id = ?", (cid,))
+            cur.execute("SELECT chat_id, name, username, lang, first_seen, last_action, feeds_history FROM chats WHERE chat_id = ?", (cid,))
             row = cur.fetchone()
             if not row:
                 return {}
             name = row["name"]
             username = row["username"]
             lang = row["lang"]
+            first_seen = row["first_seen"]
+            last_action = row["last_action"]
+            feeds_history_raw = row["feeds_history"] or "[]"
+            try:
+                feeds_history = json.loads(feeds_history_raw)
+            except Exception:
+                feeds_history = []
             cur.execute("SELECT url FROM feeds WHERE chat_id = ? ORDER BY id", (cid,))
             feeds = [r["url"] for r in cur.fetchall()]
             cur.execute("SELECT feed_url, item_id FROM seen WHERE chat_id = ?", (cid,))
@@ -313,11 +385,20 @@ class SQLiteStateStore:
             seen: Dict[str, List[str]] = {}
             for r in seen_rows:
                 seen.setdefault(r["feed_url"], []).append(r["item_id"])
-            return {"name": name, "username": username, "lang": lang, "feeds": feeds, "seen": seen}
+            return {
+                "name": name,
+                "username": username,
+                "lang": lang,
+                "first_seen": first_seen,
+                "last_action": last_action,
+                "feeds": feeds,
+                "feeds_history": feeds_history,
+                "seen": seen,
+            }
 
     def set_chat(self, chat_id: int | str, data: dict) -> None:
         """
-        Upsert chat fields. data may contain name, username, lang, feeds, seen.
+        Upsert chat fields. data may contain name, username, lang, feeds, seen, first_seen, last_action, feeds_history.
         This will overwrite feeds/seen according to provided values (if present) and keep others.
         """
         cid = str(chat_id)
@@ -326,20 +407,41 @@ class SQLiteStateStore:
         lang = data.get("lang")
         feeds_in = data.get("feeds")
         seen_in = data.get("seen")
+        first_seen_in = data.get("first_seen")
+        last_action_in = data.get("last_action")
+        feeds_history_in = data.get("feeds_history")
 
         uname = self._normalize_username(username) if username is not None else None
 
         with self._locked_cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO chats(chat_id, name, username, lang)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO chats(chat_id, name, username, lang, first_seen, last_action, feeds_history)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(chat_id) DO UPDATE SET
                   name = COALESCE(?, name),
                   username = COALESCE(?, username),
-                  lang = COALESCE(?, lang)
+                  lang = COALESCE(?, lang),
+                  first_seen = COALESCE(?, first_seen),
+                  last_action = COALESCE(?, last_action),
+                  feeds_history = COALESCE(?, feeds_history)
                 """,
-                (cid, name or None, uname, lang or None, name, uname, lang),
+                (
+                    cid,
+                    name or None,
+                    uname,
+                    lang or None,
+                    first_seen_in or None,
+                    last_action_in or None,
+                    json.dumps(feeds_history_in or []),
+                    # conflict update args
+                    name,
+                    uname,
+                    lang,
+                    first_seen_in,
+                    last_action_in,
+                    json.dumps(feeds_history_in or []) if feeds_history_in is not None else None,
+                ),
             )
 
             if feeds_in is not None:
@@ -384,12 +486,26 @@ class SQLiteStateStore:
         cid = str(chat_id)
         u = str(url)
         with self._locked_cursor() as cur:
-            cur.execute("INSERT OR IGNORE INTO chats(chat_id, lang) VALUES(?, ?)", (cid, "en"))
+            cur.execute("INSERT OR IGNORE INTO chats(chat_id, lang, feeds_history, first_seen, last_action) VALUES(?, ?, COALESCE(?, '[]'), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", (cid, "en", json.dumps([])))
             try:
                 cur.execute("INSERT INTO feeds(chat_id, url) VALUES(?, ?)", (cid, u))
-                return True
             except sqlite3.IntegrityError:
-                return False
+                pass
+
+            cur.execute("SELECT feeds_history FROM chats WHERE chat_id = ?", (cid,))
+            row = cur.fetchone()
+            if row:
+                raw = row["feeds_history"] or "[]"
+                try:
+                    arr = json.loads(raw)
+                    if not isinstance(arr, list):
+                        arr = []
+                except Exception:
+                    arr = []
+                if u not in arr:
+                    arr.append(u)
+                    cur.execute("UPDATE chats SET feeds_history = ? WHERE chat_id = ?", (json.dumps(arr, ensure_ascii=False), cid))
+            return True
 
     def remove_feed(self, chat_id: int | str, url: str) -> bool:
         cid = str(chat_id)
@@ -410,6 +526,7 @@ class SQLiteStateStore:
                 return False
             cur.execute("DELETE FROM feeds WHERE chat_id = ?", (cid,))
             cur.execute("DELETE FROM seen WHERE chat_id = ?", (cid,))
+            # do NOT clear feeds_history
             return True
 
     # --------------- seen operations ---------------
@@ -438,7 +555,7 @@ class SQLiteStateStore:
         cid = str(chat_id)
         uname = self._normalize_username(username)
         with self._locked_cursor() as cur:
-            cur.execute("INSERT OR IGNORE INTO chats(chat_id, lang) VALUES(?, ?)", (cid, "en"))
+            cur.execute("INSERT OR IGNORE INTO chats(chat_id, lang, feeds_history, first_seen, last_action) VALUES(?, ?, COALESCE(?, '[]'), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)", (cid, "en", json.dumps([])))
             cur.execute("UPDATE chats SET username = ? WHERE chat_id = ?", (uname, cid))
 
     def get_username(self, chat_id: int | str) -> Optional[str]:
@@ -461,10 +578,18 @@ class SQLiteStateStore:
             r = cur.fetchone()
             return r["chat_id"] if r else None
 
+    # --------------- action / timestamps ---------------
+    def mark_action(self, chat_id: int | str) -> None:
+        """Update last_action to now (CURRENT_TIMESTAMP). Call this when user does something."""
+        cid = str(chat_id)
+        with self._locked_cursor() as cur:
+            cur.execute("INSERT OR IGNORE INTO chats(chat_id, lang, feeds_history, first_seen) VALUES(?, ?, COALESCE(?, '[]'), CURRENT_TIMESTAMP)", (cid, "en", json.dumps([])))
+            cur.execute("UPDATE chats SET last_action = CURRENT_TIMESTAMP WHERE chat_id = ?", (cid,))
+
     # --------------- iteration ---------------
     def iter_chats(self) -> List[Tuple[str, dict]]:
         with self._locked_cursor() as cur:
-            cur.execute("SELECT chat_id, name, username, lang FROM chats ORDER BY chat_id")
+            cur.execute("SELECT chat_id, name, username, lang, first_seen, last_action, feeds_history FROM chats ORDER BY chat_id")
             rows = cur.fetchall()
             out: List[Tuple[str, dict]] = []
             for r in rows:
@@ -472,6 +597,12 @@ class SQLiteStateStore:
                 name = r["name"]
                 username = r["username"]
                 lang = r["lang"]
+                first_seen = r["first_seen"]
+                last_action = r["last_action"]
+                try:
+                    feeds_history = json.loads(r["feeds_history"] or "[]")
+                except Exception:
+                    feeds_history = []
                 cur.execute("SELECT url FROM feeds WHERE chat_id = ? ORDER BY id", (cid,))
                 feeds = [x["url"] for x in cur.fetchall()]
                 cur.execute("SELECT feed_url, item_id FROM seen WHERE chat_id = ?", (cid,))
@@ -479,7 +610,7 @@ class SQLiteStateStore:
                 seen: Dict[str, List[str]] = {}
                 for s in seen_rows:
                     seen.setdefault(s["feed_url"], []).append(s["item_id"])
-                out.append((cid, {"name": name, "username": username, "lang": lang, "feeds": feeds, "seen": seen}))
+                out.append((cid, {"name": name, "username": username, "lang": lang, "first_seen": first_seen, "last_action": last_action, "feeds": feeds, "feeds_history": feeds_history, "seen": seen}))
             return out
 
     # --------------- utilities ---------------
@@ -508,9 +639,12 @@ class SQLiteStateStore:
                 lang = st.get("lang", "en")
                 username = st.get("username", None)
                 uname = self._normalize_username(username)
+                first = st.get("first_seen")
+                last = st.get("last_action")
+                feeds_history = st.get("feeds_history") or []
                 cur.execute(
-                    "INSERT OR REPLACE INTO chats(chat_id, name, username, lang) VALUES(?, ?, ?, ?)",
-                    (str(cid), name, uname, lang),
+                    "INSERT OR REPLACE INTO chats(chat_id, name, username, lang, first_seen, last_action, feeds_history) VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (str(cid), name, uname, lang, first, last, json.dumps(feeds_history)),
                 )
                 feeds = st.get("feeds") or []
                 for u in feeds:
