@@ -36,7 +36,7 @@ from ..utils.message_formatter import format_entry, format_article, _fmt_date
 from ..utils.text import html_escape as esc, html_attr_escape as esc_attr
 from ..utils.i18n import t as _t
 # sites 
-from sites import google_trends
+from provider import google_trends, remoteok
 # تنظیمات پروژه (fallback امن اگر کلیدها وجود نداشتند)
 try:
     from app.config import settings  # type: ignore
@@ -509,6 +509,25 @@ class RSSService:
                         except Exception:
                             pass
                 return
+            
+            # RemoteOK
+            if "remoteok.com/api" in url or "remoteok.com" in url:
+                html = await remoteok.process_remoteok(f, self.store, cid_int, url)
+                if html:
+                    await app.bot.send_message(
+                        chat_id=cid_int,
+                        text=html,
+                        parse_mode="HTML",
+                        disable_web_page_preview=True,
+                    )
+                    self.stats["sent"] += 1
+                    if reporter:
+                        try:
+                            reporter.record(url, "sent")
+                        except Exception:
+                            pass
+                return
+
 
             # معمولی: بررسی ورودی‌ها و ارسال پیام‌ها
             seen = set(self.store.get_seen(cid_int, url))
