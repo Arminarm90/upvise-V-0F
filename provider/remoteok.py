@@ -411,7 +411,7 @@ async def process_remoteok(feed, store, cid_int: int, url: str) -> str | None:
             for j in jobs
             if f"remoteok:{j.get('id')}" in seen
         ]
-        final_jobs = all_jobs[:10]
+        final_jobs = all_jobs[:5]
 
         for j in new_jobs:
             seen.add(j["id"])
