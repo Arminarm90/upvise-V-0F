@@ -390,13 +390,33 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
 async def process_remoteok(feed, store, chat_id, url):
     try:
         jobs = fetch_remoteok()
-        # مثلا 5 تای اول
+        jobs.sort(key=lambda j: j.get("epoch", 0), reverse=True)
+
         out_msgs = []
+        seen_key = f"remoteok:{chat_id}"
+
         for j in jobs[:5]:
+            job_id = str(j.get("id"))
+            if not job_id:
+                continue
+
+            # اگه قبلاً دیده شده → ردش کن
+            if store.is_seen(seen_key, job_id):
+                continue
+
+            # مارک بشه که دیده شده
+            store.mark_seen(seen_key, job_id)
+
             out_msgs.append(build_message(j))
+
+        if not out_msgs:
+            return "" 
         return "\n\n".join(out_msgs)
+
     except Exception as ex:
+        logging.exception("process_remoteok failed")
         return ""
+
 
 def main():
     token = os.getenv("BOT_TOKEN")
