@@ -387,35 +387,46 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.exception("Unhandled error", exc_info=context.error)
 
-async def process_remoteok(feed, store, chat_id, url):
+async def process_remoteok(feed, store, cid_int: int, url: str) -> str | None:
     try:
         jobs = fetch_remoteok()
         jobs.sort(key=lambda j: j.get("epoch", 0), reverse=True)
 
-        out_msgs = []
-        seen_key = f"remoteok:{chat_id}"
+        seen = set(store.get_seen(cid_int, url))
+        new_jobs = []
 
-        for j in jobs[:5]:
+        for j in jobs:
             job_id = str(j.get("id"))
             if not job_id:
                 continue
+            eid = f"remoteok:{job_id}"
+            if eid not in seen:
+                new_jobs.append({"id": eid, "job": j})
 
-            # اگه قبلاً دیده شده → ردش کن
-            if store.is_seen(seen_key, job_id):
-                continue
+        if not new_jobs:
+            return None
 
-            # مارک بشه که دیده شده
-            store.mark_seen(seen_key, job_id)
+        all_jobs = new_jobs + [
+            {"id": f"remoteok:{j.get('id')}", "job": j}
+            for j in jobs
+            if f"remoteok:{j.get('id')}" in seen
+        ]
+        final_jobs = all_jobs[:10]
 
-            out_msgs.append(build_message(j))
+        for j in new_jobs:
+            seen.add(j["id"])
+        store.set_seen(cid_int, url, seen)
 
-        if not out_msgs:
-            return "" 
+        out_msgs = []
+        for item in final_jobs:
+            out_msgs.append(build_message(item["job"]))
+
         return "\n\n".join(out_msgs)
 
     except Exception as ex:
         logging.exception("process_remoteok failed")
-        return ""
+        return None
+
 
 
 def main():
