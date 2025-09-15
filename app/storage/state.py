@@ -586,6 +586,15 @@ class SQLiteStateStore:
             cur.execute("INSERT OR IGNORE INTO chats(chat_id, lang, feeds_history, first_seen) VALUES(?, ?, COALESCE(?, '[]'), CURRENT_TIMESTAMP)", (cid, "en", json.dumps([])))
             cur.execute("UPDATE chats SET last_action = CURRENT_TIMESTAMP WHERE chat_id = ?", (cid,))
 
+    # ---------------- lang helpers ----------------
+    def get_lang(self, chat_id: int | str) -> str:
+        """زبان ذخیره شده برای کاربر (پیش‌فرض en)"""
+        cid = str(chat_id)
+        with self._locked_cursor() as cur:
+            cur.execute("SELECT lang FROM chats WHERE chat_id = ?", (cid,))
+            r = cur.fetchone()
+            return r["lang"] if r and r["lang"] else "en"
+
     # --------------- iteration ---------------
     def iter_chats(self) -> List[Tuple[str, dict]]:
         with self._locked_cursor() as cur:

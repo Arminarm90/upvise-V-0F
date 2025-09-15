@@ -5,12 +5,14 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from app.storage.state import SQLiteStateStore
 
 # ---------- logging ----------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("remoteok-bot")
 
 REMOTEOK_API = "https://remoteok.com/api"
+store = SQLiteStateStore("state.db")
 
 # ---------- URL parsing ----------
 def parse_remoteok_url(u: str):
@@ -137,6 +139,36 @@ def format_salary_fa(job: dict) -> str:
                 if len(parts) == 2 else f"{parts[0]} {_currency_word(curr_sym)} در سال")
     except:
         return "نامشخص"
+
+def format_salary_en(job: dict) -> str:
+    raw = str(job.get("salary") or job.get("compensation") or "").strip()
+    if not raw:
+        smin, smax, curr = job.get("salary_min"), job.get("salary_max"), (job.get("currency") or "$")
+        if smin or smax:
+            try:
+                if smin and smax:
+                    left  = f"{int(float(smin)):,}"
+                    right = f"{int(float(smax)):,}"
+                    return f"{left} {curr}/year – {right} {curr}/year"
+                n = f"{int(float(smin or smax)):,}"
+                return f"{n} {curr}/year"
+            except:
+                pass
+        return "Unknown"
+    curr_sym = "$" if "$" in raw else ("€" if "€" in raw else ("£" if "£" in raw else "$"))
+    nums = re.findall(r"\d[\d,\.]*", raw)
+    if not nums:
+        return "Unknown"
+    try:
+        parts = []
+        for t in nums[:2]:
+            val = int(float(t.replace(",", "")))
+            parts.append(f"{val:,}")
+        return (f"{parts[0]} {curr_sym}/year – {parts[1]} {curr_sym}/year"
+                if len(parts) == 2 else f"{parts[0]} {curr_sym}/year")
+    except:
+        return "Unknown"
+
 
 # ---------- helpers ----------
 _COUNTRY_SLUG_MAP = {
@@ -293,7 +325,7 @@ def scrape_job_html(job_url: str) -> dict | None:
         return None
 
 # ---------- message builder ----------
-def build_message(job: dict) -> str:
+def build_message(job: dict, lang: str) -> str:
     title = job.get("position") or job.get("title") or "Job Title"
     company = job.get("company") or "Unknown"
     dt = _get_dt(job)
@@ -302,7 +334,10 @@ def build_message(job: dict) -> str:
     location = format_location(job)
     tags_list = (job.get("tags") or [])[:5]
     tags = ", ".join([t.strip().title() for t in tags_list]) or "—"
-    salary = format_salary_fa(job)
+    if lang.lower().startswith("fa"):
+        salary = format_salary_fa(job)
+    else:
+        salary = format_salary_en(job)
     url = job.get("url") or job.get("apply_url") or job.get("url_job") or ""
 
     title_h   = html.escape(title)
@@ -311,16 +346,29 @@ def build_message(job: dict) -> str:
     tags_h    = html.escape(tags)
     url_h     = html.escape(url)
 
-    header = f"<b>{title_h}</b>\n<i>{company_h} | {date_hdr_gregorian}</i>"
-    body = (
-        f"\n\n🔰 موقعیت شغلی: {title_h}"
-        f"\n🏢 شرکت: {company_h}"
-        f"\n🌍 موقعیت مکانی: {location_h}"
-        f"\n🏷️ مهارت‌ها: {tags_h}"
-        f"\n💰 حقوق: {salary or 'نامشخص'}"
-        f"\n🗓 تاریخ انتشار: {date_body_jalali}\n\n"
-        f"🔗 <a href=\"{url_h}\">لینک آگهی</a>"
-    )
+    if lang.lower().startswith("fa"):
+        header = f"<b>{title_h}</b>\n<i>{company_h} | {date_hdr_gregorian}</i>"
+        body = (
+            f"\n\n🔰 موقعیت شغلی: {title_h}"
+            f"\n🏢 شرکت: {company_h}"
+            f"\n🌍 موقعیت مکانی: {location_h}"
+            f"\n🏷️ مهارت‌ها: {tags_h}"
+            f"\n💰 حقوق: {salary or 'نامشخص'}"
+            f"\n🗓 تاریخ انتشار: {date_body_jalali}\n\n"
+            f"🔗 <a href=\"{url_h}\">لینک آگهی</a>"
+        )
+    else:
+        header = f"<b>{title_h}</b>\n<i>{company_h} | {date_hdr_gregorian}</i>"
+        body = (
+            f"\n\n🔰 Job Position: {title_h}"
+            f"\n🏢 Company: {company_h}"
+            f"\n🌍 Location: {location_h}"
+            f"\n🏷️ Skills: {tags_h}"
+            f"\n💰 Salary: {salary or 'Unknown'}"
+            f"\n🗓 Published: {date_hdr_gregorian}\n\n"
+            f"🔗 <a href=\"{url_h}\">Job Link</a>"
+        )
+
     return header + body
 
 # ---------- bot ----------
@@ -359,7 +407,12 @@ async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
         one = next((j for j in jobs if str(j.get("id")) == str(job_id)), None)
         if one:
             logger.info("Sending single job from API id=%s title=%s", one.get("id"), (one.get("position") or one.get("title")))
-            await update.message.reply_text(build_message(one), parse_mode="HTML", disable_web_page_preview=True)
+            user_lang = getattr(store, "get_lang", lambda cid: "en")(update.effective_chat.id)
+
+            await update.message.reply_text(
+                build_message(one, lang=user_lang),
+                parse_mode="HTML", disable_web_page_preview=True
+            )
             return
         scraped = scrape_job_html(text)
         if scraped:
@@ -393,8 +446,8 @@ async def process_remoteok(feed, store, cid_int: int, url: str) -> str | None:
         jobs.sort(key=lambda j: j.get("epoch", 0), reverse=True)
 
         seen = set(store.get_seen(cid_int, url))
+        user_lang = getattr(store, "get_lang", lambda cid: "en")(cid_int)
         new_jobs = []
-
         for j in jobs:
             job_id = str(j.get("id"))
             if not job_id:
@@ -419,7 +472,7 @@ async def process_remoteok(feed, store, cid_int: int, url: str) -> str | None:
 
         out_msgs = []
         for item in final_jobs:
-            out_msgs.append(build_message(item["job"]))
+            out_msgs.append(build_message(item["job"], lang=user_lang))
 
         return "\n\n".join(out_msgs)
 
