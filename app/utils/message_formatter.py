@@ -455,7 +455,8 @@ def render_title_only(
 
     footer = L.get("flash_footer", "⚡ Flash | Quick View")
 
-    return header + content_line + src_line + "\n" + footer
+    # return header + content_line + src_line + "\n" + footer
+    return header + src_line + "\n" + footer
 
 # ---------- convenience small-format helpers used by RSS as fallback ----------
 async def format_entry(feed_title: str, entry: Any, summarizer, url: str, lang: str = "fa") -> Optional[str]:
