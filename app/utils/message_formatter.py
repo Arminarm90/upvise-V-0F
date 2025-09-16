@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import re
 from bs4 import BeautifulSoup
 import html
 import html as _html_mod
 from ..services.summary import _translate as translate_fn  # تابع ترجمه از summary.py
+# from ..services.summary import _lite_summary_short
 try:
     from deep_translator import GoogleTranslator as _GT
 except Exception:
@@ -51,6 +52,8 @@ except Exception:
 # ---- escape های HTML تلگرام -------------------------------------------------
 from .text import html_escape as esc, html_attr_escape as esc_attr
 
+import logging
+LOG = logging.getLogger("message_formatter")
 
 # ==== قالب خروجی ====
 TEMPLATE_TITLE  = "<b>{title}</b>"
@@ -86,6 +89,161 @@ def _clean_html(s: str) -> str:
         tnode.decompose()
     return re.sub(r"\s+", " ", soup.get_text(" ", strip=True)).strip()
 
+
+def _clean_html(raw: str) -> str:
+    if not raw:
+        return ""
+    try:
+        s = _html_mod.unescape(str(raw))
+    except Exception:
+        s = str(raw)
+
+    try:
+        soup = BeautifulSoup(s, "html.parser")
+        for tnode in soup(["script", "style", "noscript", "iframe", "embed", "svg", "img"]):
+            try:
+                tnode.decompose()
+            except Exception:
+                pass
+        text = soup.get_text(separator=" ", strip=True)
+    except Exception:
+        text = re.sub(r"<[^>]+>", " ", s) 
+
+    text = re.sub(r"\s+", " ", (text or "")).strip()
+
+    text = re.sub(r"<\s*a\s+[^>]*>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"</\s*a\s*>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:5000]  # cap
+
+def _strip_noise_from_feed_text(text: str) -> str:
+    if not text:
+        return ""
+    s = text
+    s = re.split(r"View Full Coverage on Google News|View full coverage|View Full Coverage", s, flags=re.IGNORECASE)[0]
+    s = re.split(r"Read more|Read the full story|Full Coverage|View Full Story", s, flags=re.IGNORECASE)[0]
+    s = re.sub(r"(?i)view full coverage.*", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.strip(" \n\r\t-–—:;,.")
+    return s
+
+async def extract_content_from_entry(entry, link: str = "") -> str:
+    raw = ""
+    try:
+        if getattr(entry, "summary_detail", None) and getattr(entry.summary_detail, "value", None):
+            raw = entry.summary_detail.value or ""
+        if not raw and getattr(entry, "summary", None):
+            raw = entry.summary or ""
+        if not raw and getattr(entry, "description", None):
+            raw = entry.description or ""
+        if not raw and getattr(entry, "content", None):
+            c = entry.content
+            if isinstance(c, (list, tuple)) and c:
+                vals = []
+                for it in c:
+                    try:
+                        if hasattr(it, "value"):
+                            vals.append(it.value or "")
+                        elif isinstance(it, dict):
+                            vals.append(it.get("value", ""))
+                        else:
+                            vals.append(str(it))
+                    except Exception:
+                        continue
+                raw = " ".join([v for v in vals if v])
+            elif isinstance(c, str):
+                raw = c
+
+        if not raw:
+            try:
+                raw = entry.get("content_encoded", "") or entry.get("content:encoded", "") or raw
+            except Exception:
+                raw = getattr(entry, "content_encoded", "") or getattr(entry, "content:encoded", "") or raw
+
+        if not raw:
+            try:
+                links = getattr(entry, "links", None) or []
+                for l in links:
+                    href = l.get("href") if isinstance(l, dict) else getattr(l, "href", None)
+                    title = l.get("title") if isinstance(l, dict) else getattr(l, "title", None)
+                    rel = (l.get("rel") if isinstance(l, dict) else getattr(l, "rel", None)) or ""
+                    if title and not raw:
+                        raw = title
+                        break
+                media = getattr(entry, "media_content", None) or []
+                if not raw and isinstance(media, (list, tuple)) and media:
+                    if isinstance(media[0], dict):
+                        raw = media[0].get("description") or media[0].get("title") or raw
+            except Exception:
+                pass
+    except Exception:
+        raw = ""
+
+    cleaned = _clean_html(raw)
+    cleaned = _strip_noise_from_feed_text(cleaned)
+
+    if (not cleaned or len(cleaned) < 80) and link:
+        try:
+            page_txt = await fetch_article_text(link, timeout=int(getattr(settings, "fetcher_timeout", 12)))
+            if page_txt:
+                cleaned_page = _clean_html(page_txt)
+                cleaned_page = _strip_noise_from_feed_text(cleaned_page)
+                # prefer page text if it's meaningfully longer than feed snippet
+                if cleaned_page and (len(cleaned_page) > len(cleaned) or len(cleaned) > 200):
+                    cleaned = cleaned_page
+        except Exception:
+            pass
+
+    if cleaned and len(cleaned) > 5000:
+        cleaned = cleaned[:5000]
+
+    LOG.debug("extract_content_from_entry length=%d for title=%r", len(cleaned or ""), getattr(entry, "title", "") or "")
+    return cleaned
+
+
+def _lite_summary_short(title: str, text: str) -> Tuple[str, List[str]]:
+    src = (text or "").strip()
+    if not src:
+        return "", []
+
+    src = re.sub(r"\s+", " ", src).strip()
+    src = re.split(r"View Full Coverage on Google News|View full coverage|View Full Coverage|Read more", src, flags=re.IGNORECASE)[0]
+
+    sentences = re.split(r"(?<=[.!؟\?])\s+", src)
+
+    title_short = (title or "").strip()
+    if len(title_short) > 60:
+        title_short = title_short[:60]
+    title_short_lower = title_short.lower()
+
+    clean_sents = []
+    for s in sentences:
+        ss = s.strip()
+        if not ss:
+            continue
+        # اگر جمله مستقیماً همان عنوان یا شامل بخشی از عنوان است، رد کن
+        if title_short_lower and title_short_lower in ss.lower():
+            continue
+        if len(ss) < 25:
+            continue
+        clean_sents.append(ss)
+        if len(clean_sents) >= 2:
+            break
+
+    if clean_sents:
+        tldr = " ".join(clean_sents[:2]).strip()
+        if len(tldr) > 220:
+            tldr = tldr[:200].rsplit(" ", 1)[0] + "…"
+        return tldr, []
+
+    snippet = src.strip()
+    if not snippet:
+        return "", []
+    if title_short_lower and title_short_lower in snippet.lower():
+        return "", []
+    if len(snippet) > 220:
+        snippet = snippet[:200].rsplit(" ", 1)[0] + "…"
+    return snippet, []
 
 def _clean_bullet(s: str) -> str:
     s = (s or "").strip()
@@ -357,6 +515,8 @@ def _clean_title_for_translate(title: str) -> str:
         return title.split(" - ")[0].strip()
     return title.strip()
 
+
+
 def _smart_translate_title(title: str, lang: str) -> str:
     """ترجمه بهتر عنوان: کوتاه‌سازی → ترجمه → پاکسازی"""
     if not title or not lang or not _GT:
@@ -382,95 +542,75 @@ def _smart_translate_title(title: str, lang: str) -> str:
         return title or ""
 
 def render_title_only(
-        title: str,
-        feed_title: str,
-        date: str,
-        src_link: str,
-        lang: str = "fa",
-    ) -> str:    
+    title: str,
+    feed_title: str,
+    date: str,
+    src_link: str,
+    lang: str = "fa",
+    content: str = "",
+) -> str:    
     """
-    قالب مرحله 3 — فقط عنوان و منبع (کمینه)
-    خروجی مشابه نمونه:
-    
-    AI Breakthrough Promises Faster Drug Discovery
-    Tech Insider | 2025-09-07
-
-    📌 پژوهشگران ...
-    
-    🔗 [منبع]
-    ⚡ Flash | Quick View
+    قالب حالت ۳ — عنوان + منبع + خلاصه لایت (نه AI).
     """
-    try:
-        _html_escape = html_escape 
-    except NameError:
-        _html_escape = _html_mod.escape
 
-    try:
-        _html_attr_escape = html_attr_escape
-    except NameError:
-        _html_attr_escape = _html_mod.escape
-
-    if "_labels_for_lang" in globals():
-        L = _labels_for_lang(lang)
+    # --- labels ---
+    if (lang or "").lower().startswith("fa"):
+        L = {
+            "source": "منبع",
+            "flash_footer": "⚡ Flash | Quick View",
+            "anchor_source": "🔗",
+        }
     else:
-        if (lang or "").lower().startswith("fa"):
-            L = {
-                "source": "منبع",
-                "flash_footer": "⚡ Flash | Quick View",
-                "anchor_source": "🔗",
-            }
-        else:
-            L = {
-                "source": "Source",
-                "flash_footer": "⚡ Flash | Quick View",
-                "anchor_source": "🔗",
-            }
+        L = {
+            "source": "Source",
+            "flash_footer": "⚡ Flash | Quick View",
+            "anchor_source": "🔗",
+        }
 
-    safe_title = _html_escape(title or "")
-    safe_feed = _html_escape(feed_title or "")
-    safe_meta = _html_escape(date or "")
+    safe_title = html.escape(title or "")
+    safe_feed = html.escape(feed_title or "")
+    safe_meta = html.escape(date or "")
 
     header = f"<b>{safe_title}</b>\n<i>{safe_feed}</i> | <i>{safe_meta}</i>\n\n"
+    # --- خلاصه لایت ---
+    summary_block = ""
+    tldr, bullets = _lite_summary_short(title, content or "")
+    if tldr:
+        if title and tldr.strip().lower() == title.strip().lower():
+            tldr = ""
+    if tldr:
+        summary_block += f"📌 {html.escape(tldr)}\n"
+        for b in bullets:
+            summary_block += f"🔹 {html.escape(b)}\n"
+        if summary_block:
+            summary_block += "\n"
 
 
-    translated_content_title = ""
-    if translate_fn and callable(translate_fn):
-        try:
-            maybe = _smart_translate_title(title or "", (lang or "").split("-")[0])
-            if maybe and isinstance(maybe, str):
-                translated_content_title = maybe.strip()
-        except Exception:
-            translated_content_title = ""
-
-    # if translation not produced, use original title as content
-    # content_title = translated_content_title or (title or "")
-
-    safe_content_title = _html_escape(translated_content_title)
-
-    content_line = f"📌 {safe_content_title}\n\n"
-
+    # --- لینک منبع ---
     src_line = ""
     if src_link:
-        src_line = f'<a href="{_html_attr_escape(src_link)}">{_html_escape(L.get("anchor_source","🔗"))} {_html_escape(L.get("source","Source"))}</a>\n'
+        src_line = f'<a href="{html.escape(src_link)}">{html.escape(L["anchor_source"])} {html.escape(L["source"])}</a>\n'
 
-    footer = L.get("flash_footer", "⚡ Flash | Quick View")
+    footer = L["flash_footer"]
 
-    # return header + content_line + src_line + "\n" + footer
-    return header + src_line + "\n" + footer
+    return header + summary_block + src_line + "\n" + footer
+
 
 # ---------- convenience small-format helpers used by RSS as fallback ----------
 async def format_entry(feed_title: str, entry: Any, summarizer, url: str, lang: str = "fa") -> Optional[str]:
     try:
         title = (getattr(entry, "title", "") or "").strip()
-        text = (getattr(entry, "summary", "") or getattr(entry, "description", "") or "").strip()
-        if not text and getattr(entry, "link", None):
-            text = title
+        link = getattr(entry, "link", "") or url
+
+        raw_content = await extract_content_from_entry(entry, link)
+
+        text_for_summary = raw_content or (getattr(entry, "summary", "") or getattr(entry, "description", "") or "").strip() or title
 
         parts = None
         sfn = getattr(summarizer, "summarize", None)
         if callable(sfn):
             try:
-                tldr, bullets = await sfn(title=title, text=text)
+                tldr, bullets = await sfn(title=title, text=text_for_summary)
                 parts = {"tldr": tldr or "", "bullets": bullets or []}
             except Exception:
                 parts = {"tldr": "", "bullets": []}
@@ -481,9 +621,12 @@ async def format_entry(feed_title: str, entry: Any, summarizer, url: str, lang: 
         if parts and (parts.get("tldr") or parts.get("bullets")):
             return render_search_fallback(title, feed_title, date, parts, link, lang=lang)
 
-        return render_title_only(title, feed_title, date, link, lang=lang)
+        return render_title_only(title, feed_title, date, link, lang=lang, content=raw_content)
     except Exception:
+        LOG.exception("format_entry failed", exc_info=True)
         return None
+
+
 
 async def format_article(feed_title: str, title: str, link: str, text: str, summarizer, lang: str = "fa") -> Optional[str]:
     try:

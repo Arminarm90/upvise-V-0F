@@ -633,7 +633,20 @@ class RSSService:
                         except Exception:
                             LOG.debug("send_message failed for title_only (cid=%s)", cid_int, exc_info=True)
                     else:
-                        msg = render_title_only(title_text, feed_title, date, link, lang=chat_lang, translate_fn=_summary_translate,)
+                        raw_content = ""
+                        if getattr(e, "summary", None):
+                            raw_content = e.summary
+                        elif getattr(e, "description", None):
+                            raw_content = e.description
+                        elif getattr(e, "content", None):
+                            c = e.content
+                            if isinstance(c, list) and c:
+                                raw_content = c[0].get("value", "")
+                            elif isinstance(c, str):
+                                raw_content = c     
+                        # msg = render_title_only(title_text, feed_title, date, link, lang=chat_lang, translate_fn=_summary_translate,)
+                        msg = render_title_only(title_text, feed_title, date, link, lang=chat_lang, content=raw_content)
+                       
                         try:
                             await app.bot.send_message(chat_id=cid_int, text=msg, parse_mode="HTML", disable_web_page_preview=True)
                             self.stats["sent"] += 1

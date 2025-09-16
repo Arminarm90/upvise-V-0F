@@ -5,6 +5,7 @@ from typing import Tuple, List, Optional
 import json, re
 import asyncio
 import itertools
+from bs4 import BeautifulSoup
 
 try:
     import google.generativeai as genai
@@ -265,7 +266,54 @@ def get_gemini_key() -> str:
 #     bullets = _dedupe_cap(points, cap=getattr(settings, "summary_max_bullets", 4))
 #     # enforce language lightly
 #     tldr, bullets = _force_lang(tldr, bullets, getattr(settings, "prompt_lang", "fa"))
+#     if not tldr and title:
+#         tldr = title
 #     return tldr, bullets
+
+# # --- اضافه/جایگزین اینها در message_formatter.py ---
+# def _lite_summary_short(title: str, text: str) -> Tuple[str, List[str]]:
+#     """Very short heuristic summary: 1-2 sentences (~<=200 chars), avoid repeating title."""
+#     src = (text or "").strip()
+#     if not src:
+#         return "", []
+
+#     src = re.sub(r"\s+", " ", src).strip()
+#     src = _strip_noise_from_feed_text(src)
+
+#     # split into sentences
+#     sentences = re.split(r"(?<=[.!؟\?])\s+", src)
+#     title_short = (title or "").strip()
+#     if len(title_short) > 60:
+#         title_short = title_short[:60]
+#     ts = title_short.lower()
+
+#     good = []
+#     for s in sentences:
+#         s2 = s.strip()
+#         if not s2:
+#             continue
+#         if ts and ts in s2.lower():
+#             continue
+#         if len(s2) < 25:
+#             continue
+#         good.append(s2)
+#         if len(good) >= 2:
+#             break
+
+#     if good:
+#         tldr = " ".join(good[:2]).strip()
+#         if len(tldr) > 220:
+#             tldr = tldr[:200].rsplit(" ", 1)[0] + "…"
+#         return tldr, []
+
+#     snippet = src
+#     if ts and ts in snippet.lower():
+#         # no good snippet
+#         return "", []
+#     if len(snippet) > 220:
+#         snippet = snippet[:200].rsplit(" ", 1)[0] + "…"
+#     return snippet, []
+
 
 
 async def _call_ai(model, prompt: str) -> str:
