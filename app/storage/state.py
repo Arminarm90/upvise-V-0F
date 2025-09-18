@@ -292,6 +292,16 @@ class SQLiteStateStore:
                 )
                 """
             )
+            cur.execute(
+            """
+                CREATE TABLE IF NOT EXISTS kv (
+                    chat_id TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT,
+                    PRIMARY KEY (chat_id, key)
+                )
+            """
+            )
             self.conn.commit()
 
             cur.execute("PRAGMA table_info(chats);")
@@ -632,7 +642,32 @@ class SQLiteStateStore:
             self.conn.close()
         except Exception:
             pass
+        
+    # ---------------------- KV Inserts----------------------
+    def set_kv(self, chat_id: int, key: str, value: Any) -> None:
+        """ذخیره یک مقدار (dict) به صورت JSON در جدول kv."""
+        with self._locked_cursor() as cur:
+            cur.execute(
+                "INSERT OR REPLACE INTO kv(chat_id, key, value) VALUES(?, ?, ?)",
+                (str(chat_id), key, json.dumps(value))
+            )
+            self.conn.commit()
 
+    def get_kv(self, chat_id: int, key: str) -> Optional[Any]:
+        """بازیابی یک مقدار از جدول kv و تبدیل آن به dict."""
+        try:
+            with self._locked_cursor() as cur:
+                cur.execute(
+                    "SELECT value FROM kv WHERE chat_id = ? AND key = ?",
+                    (str(chat_id), key)
+                )
+                row = cur.fetchone()
+                if row:
+                    return json.loads(row[0])
+                return None
+        except (sqlite3.OperationalError, json.JSONDecodeError):
+            return None
+    
     def import_from_json_file(self, json_path: str) -> None:
         """Utility: import existing JSON state (same format as old StateStore)."""
         if not os.path.exists(json_path):

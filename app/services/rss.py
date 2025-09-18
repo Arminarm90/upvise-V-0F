@@ -35,8 +35,11 @@ from ..utils.i18n import get_chat_lang
 from ..utils.message_formatter import format_entry, format_article, _fmt_date
 from ..utils.text import html_escape as esc, html_attr_escape as esc_attr
 from ..utils.i18n import t as _t
+
 # sites 
 from provider import google_trends, remoteok
+from provider.vipgold import process_gold, process_news, collect_gold, process_gold_and_news
+
 # تنظیمات پروژه (fallback امن اگر کلیدها وجود نداشتند)
 try:
     from app.config import settings  # type: ignore
@@ -67,6 +70,11 @@ logging.basicConfig(
     format="%(levelname)s:%(name)s:%(message)s",
 )
 LOG = logging.getLogger("rss")
+
+# Macher list 
+PROVIDERS = [
+    (lambda u: "xminit.com/vip/goldir" in (u or "").lower(), process_gold_and_news),
+]
 
 
 class RSSService:
@@ -528,7 +536,25 @@ class RSSService:
                             pass
                 return
 
+            # --- provider check (custom providers like gold/news) ---            
+            for matcher, fn in PROVIDERS:
+                try:
+                    if matcher(url):
+                        res = await fn(self.store, cid_int, url, chat_lang)
 
+                        if res:
+                            await app.bot.send_message(
+                                chat_id=cid_int,
+                                text=res,
+                                parse_mode="Markdown",
+                                disable_web_page_preview=True,
+                            )
+                            self.stats["sent"] += 1
+                        return
+                except Exception:
+                    LOG.exception("provider processing failed for %s (cid=%s)", url, cid_int)
+                    return
+                        
             # معمولی: بررسی ورودی‌ها و ارسال پیام‌ها
             seen = set(self.store.get_seen(cid_int, url))
             cap = int(getattr(settings, "rss_max_items_per_feed", 10))
@@ -886,6 +912,24 @@ class RSSService:
 
             # برای هر فید که با موفقیت گرفته شده، یک task پردازش ایجاد کن
             proc_tasks = []
+            
+            # WITH NO RSS
+            for url in batch:
+                matched = False
+                for matcher, fn in PROVIDERS:
+                    if matcher(url):
+                        proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, None, chat_lang, reporter)))
+                        matched = True
+                        break
+                if matched:
+                    continue
+
+                res = await _fetch_with_sem(url)
+                if not res:
+                    continue
+                proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, res, chat_lang, reporter)))
+            
+            # WITH RSS            # 
             for url, res in zip(batch, results):
                 if isinstance(res, Exception) or not res:
                     LOG.debug("No feed parsed for %s (chat=%s): %s", url, cid_int, res)
