@@ -504,6 +504,12 @@ class RSSService:
         پردازش یک فید (فید از قبل با _fetch_feed گرفته شده و پارس شده).
         این تابع مسئول ارسال پیام‌ها، آپدیت seen و reporter/stat است.
         """
+        # ⏩ چک کن ببین هنوز feed برای این کاربر هست یا نه
+        current_feeds = set(self.store.list_feeds(cid_int))
+        if url not in current_feeds:
+            LOG.info("⏩ skipping %s for chat=%s because feed was removed", url, cid_int)
+            return
+
         try:
             # Google Trends
             if "trends.google.com/trending/rss" in url:
@@ -874,22 +880,26 @@ class RSSService:
             except Exception:
                 chat_lang = "fa"
 
-            feeds: list[str] = list(st.get("feeds", []))
+            feeds: list[str] = self.store.list_feeds(cid_int)  # ✅ مستقیم از دیتابیس
             if not feeds:
                 continue
 
-            # shuffle order to avoid bias toward some feeds
             random.shuffle(feeds)
 
-            # batch cursor (in-memory). اگر بخوای persistent کن می‌تونی اینو در StateStore ذخیره کنی.
+            # دوباره از store گرفتن، نه از state قدیمی
             start = self._cursor_per_chat.get(cid_int, 0)
             batch_size = int(getattr(settings, "rss_batch_size", 20))
             if start >= len(feeds):
                 start = 0
             end = min(len(feeds), start + batch_size)
+
+            # ✅ batch کاملاً sync با دیتابیس
             batch = feeds[start:end]
+
             next_index = end if end < len(feeds) else 0
             self._cursor_per_chat[cid_int] = next_index
+
+
 
             LOG.info("Polling chat=%s feeds_total=%d batch=%d (start=%d next=%d)",
                      cid_int, len(feeds), len(batch), start, next_index)
@@ -906,12 +916,29 @@ class RSSService:
                         LOG.debug("fetch failed for %s: %s", u, ex)
                         return None
 
-            # fetch همهٔ فیدهای batch به صورت concurrency-limited
+            # WITH RSS            
             fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in batch]
             results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
             # برای هر فید که با موفقیت گرفته شده، یک task پردازش ایجاد کن
             proc_tasks = []
+            # اضافه کردن چک در اینجا
+            current_feeds = set(self.store.list_feeds(cid_int))
+            for url, res in zip(batch, results):
+                if isinstance(res, Exception) or not res:
+                    LOG.debug("No feed parsed for %s (chat=%s): %s", url, cid_int, res)
+                    continue
+
+                if url not in current_feeds:
+                    LOG.info("⏩ feed %s skipped because removed from db", url)
+                    continue
+
+                # پردازش را موازی اجرا کن (هر پردازش خودش ارسال را انجام می‌دهد)
+                proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, res, chat_lang, reporter)))
+
+            # منتظر بمون که همه پردازش‌ها تموم بشن (اگر proc_tasks خالی بود همین خط سریع رد میشه)
+            if proc_tasks:
+                await asyncio.gather(*proc_tasks, return_exceptions=True)
             
             # WITH NO RSS
             for url in batch:
@@ -929,18 +956,7 @@ class RSSService:
                     continue
                 proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, res, chat_lang, reporter)))
             
-            # WITH RSS            # 
-            for url, res in zip(batch, results):
-                if isinstance(res, Exception) or not res:
-                    LOG.debug("No feed parsed for %s (chat=%s): %s", url, cid_int, res)
-                    # می‌تونی اینجا reporter.record(url,'skipped', 'fetch_failed') بزنی اگر خواستی
-                    continue
-                # پردازش را موازی اجرا کن (هر پردازش خودش ارسال را انجام می‌دهد)
-                proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, res, chat_lang, reporter)))
 
-            # منتظر بمون که همه پردازش‌ها تموم بشن (اگر proc_tasks خالی بود همین خط سریع رد میشه)
-            if proc_tasks:
-                await asyncio.gather(*proc_tasks, return_exceptions=True)
 
         # لاگ کلی آمار
         total = self.stats["sent"] + self.stats["skipped"]

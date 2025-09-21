@@ -90,6 +90,16 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     site = _canon(raw)
 
+    # Our links 
+    if "/vip/goldir" in site.lower():
+        store.add_feed(chat_id, site)
+        if store.add_feed(chat_id, site):
+            store.mark_action(chat_id)
+            await update.effective_message.reply_text(t("add.added_feed", lang))
+        else: 
+            m = await update.effective_message.reply_text(t("add.already_added", lang))
+        return ConversationHandler.END
+
     # 1) اگر خودِ ورودی RSS معتبر بود (کاربر حرفه‌ای)، مستقیم اضافه کن
     try:
         if await rss.is_valid_feed(site):
