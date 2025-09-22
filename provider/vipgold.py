@@ -552,30 +552,31 @@ async def process_gold(store, chat_id, url, chat_lang):
 
 
 async def process_news(store, chat_id, url, chat_lang):
-    try:
-        items = _collect_news_from_range(NEWS_FEEDS, want_max=8)
-    except Exception:
-        last_item = store.get_kv(chat_id, "last_news_item")
-        if last_item:
-            return (
-                "🧠 خبرهای اثرگذار بر بازار طلا\n\n*"
-                f"✔️ {last_item['title']} "
-                f"(منبع: [{last_item['source']}]({last_item['link']}))\n\n"
-                "خبر جدیدی منتشر نشده✖️"
-            )
-        return "❌ مشکلی در دریافت اخبار رخ داد."
+    # try:
+    #     items = _collect_news_from_range(NEWS_FEEDS, want_max=8)
+    # except Exception:
+    #     last_item = store.get_kv(chat_id, "last_news_item")
+    #     if last_item:
+    #         return (
+    #             "🧠 خبرهای اثرگذار بر بازار طلا\n\n*"
+    #             f"✔️ {last_item['title']} "
+    #             f"(منبع: [{last_item['source']}]({last_item['link']}))\n\n"
+    #             "خبر جدیدی منتشر نشده✖️"
+    #         )
+    #     return "❌ مشکلی در دریافت اخبار رخ داد."
 
-    if not items:
-        last_item = store.get_kv(chat_id, "last_news_item")
-        if last_item:
-            return (
-                "🧠 *خبرهای اثرگذار بر بازار طلا*\n\n"
-                f"✔️ {last_item['title']} "
-                f"(منبع: [{last_item['source']}]({last_item['link']}))\n\n"
-                "خبر جدیدی منتشر نشده✖️"
-            )
-        return "❌ خبری پیدا نشد."
-
+    # if not items:
+    #     last_item = store.get_kv(chat_id, "last_news_item")
+    #     if last_item:
+    #         return (
+    #             "🧠 *خبرهای اثرگذار بر بازار طلا*\n\n"
+    #             f"✔️ {last_item['title']} "
+    #             f"(منبع: [{last_item['source']}]({last_item['link']}))\n\n"
+    #             "خبر جدیدی منتشر نشده✖️"
+    #         )
+    #     return "❌ خبری پیدا نشد."
+    
+    items = _collect_news_from_range(NEWS_FEEDS, want_max=8)
     seen = set(store.get_seen(chat_id, url))
     new_items = []
     for it in items:
