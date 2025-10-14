@@ -414,7 +414,7 @@ def _labels_for_lang(lang: str) -> Dict[str, str]:
             "risks": "🔻 ریسک‌ها",
             "signal": "📊 سیگنال",
             "source": "منبع",
-            "flash": "⚡ Flash | Quick View",
+            # "flash": "⚡ Flash | Quick View",
             "anchor_source": "🔗",
             "bullet_prefix": "✔️",
         }
@@ -426,7 +426,7 @@ def _labels_for_lang(lang: str) -> Dict[str, str]:
         "risks": "🔻 Risks",
         "signal": "📊 Signal",
         "source": "Source",
-        "flash": "⚡ Flash | Quick View",
+        # "flash": "⚡ Flash | Quick View",
         "anchor_source": "🔗",
         "bullet_prefix": "✔️",
     }

@@ -136,7 +136,8 @@ class Settings:
     # --- URL canonicalization ---
     allow_strip_www: bool = _get_bool("ALLOW_STRIP_WWW", False)
     canonical_remove_trailing_slash: bool = _get_bool("CANONICAL_REMOVE_TRAILING_SLASH", True)
-
+    
+        
     def __post_init__(self) -> None:
         if not self.ua:
             self.ua = self.rss_ua or self.fetcher_ua

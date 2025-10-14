@@ -18,6 +18,11 @@ from .handlers.lang import cmd_lang, cb_lang
 from .handlers.list import cmd_list, cb_list_nav
 from .utils.i18n import load_locales, t
 
+# sub
+from telegram.ext import CommandHandler
+from app.handlers.payment import cmd_buy
+from app.handlers.payment import get_payment_handlers
+
 LOG = logging.getLogger(__name__)
 
 
@@ -131,6 +136,9 @@ def build_app() -> Application:
     # /lang + تغییر زبان با دکمه‌ها
     app.add_handler(CommandHandler("lang", cmd_lang))
     app.add_handler(CallbackQueryHandler(cb_lang, pattern=r"^lang:"))
+    
+    app.add_handler(CommandHandler("buy", get_payment_handlers()[0][1]))
+    app.add_handler(get_payment_handlers()[1])
 
     # ---- Error handler سراسری
     app.add_error_handler(on_error)

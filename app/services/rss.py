@@ -40,6 +40,9 @@ from ..utils.i18n import t as _t
 from provider import google_trends, remoteok
 from provider.vipgold import process_gold, process_news, collect_gold, process_gold_and_news
 
+import yaml
+from pathlib import Path
+
 # تنظیمات پروژه (fallback امن اگر کلیدها وجود نداشتند)
 try:
     from app.config import settings  # type: ignore
@@ -76,7 +79,14 @@ PROVIDERS = [
     (lambda u: "xminit.com/vip/goldir" in (u or "").lower(), process_gold_and_news),
 ]
 
-
+# Admin sites 
+ADMIN_SITES_FILE = Path(__file__).resolve().parent.parent / "admin_sites/admin_sites.yaml"
+try:
+    with open(ADMIN_SITES_FILE, "r", encoding="utf-8") as f:
+        ADMIN_FEEDS = yaml.safe_load(f).get("admin_feeds", [])
+except Exception:
+    ADMIN_FEEDS = []
+    
 class RSSService:
     """
     سرویس پایش RSS و Page‑Watch (نسخه‌ی یکپارچه با خلاصه‌سازی)
@@ -93,6 +103,10 @@ class RSSService:
          # نگهداری ایندکس (cursor) برای هر چت در runtime
         self._fallback_cache: dict[tuple[int,str], float] = {}   # key = (chat_id, entry_id)
         self._cursor_per_chat: dict[int,int] = {}
+        self._keyword_global_matches = {}  # key=chat_id → {kw: [(eid,e,f,url)]}
+        self._keyword_seen_global = {}     # key=chat_id → set(eid)
+        self._admin_seen_cache: dict[tuple[int,str], set] = {}  # key = (chat_id, feed_url)
+
     # ------------------------------------------------------------------ #
     # Feeds
     # ------------------------------------------------------------------ #
@@ -499,6 +513,95 @@ class RSSService:
 
         return header + "\n".join(body_parts).strip()
 
+    def _get_seen_safe(self, cid_int: int, url: str) -> set:
+        """
+        خواندن seen برای یک feed به‌صورت امن:
+        - اگر url در ADMIN_FEEDS باشد و کاربر آن را در list_feeds نداشته باشد،
+          از کش محلی استفاده کن (تا به دیتابیس فید اضافه نشود).
+        - در غیر این صورت از store.get_seen استفاده کن.
+        """
+        try:
+            user_has = url in set(self.store.list_feeds(cid_int))
+        except Exception:
+            user_has = False
+
+        if url in ADMIN_FEEDS and not user_has:
+            return set(self._admin_seen_cache.get((cid_int, url), set()))
+        try:
+            return set(self.store.get_seen(cid_int, url))
+        except Exception:
+            return set()
+
+    def _set_seen_safe(self, cid_int: int, url: str, seen: set) -> None:
+        """
+        نوشتن seen به‌صورت امن (مشابه توضیح بالا).
+        """
+        try:
+            user_has = url in set(self.store.list_feeds(cid_int))
+        except Exception:
+            user_has = False
+
+        if url in ADMIN_FEEDS and not user_has:
+            # فقط داخل کش محلی نگهدار تا به دیتابیس کاربر اضافه نشه
+            self._admin_seen_cache[(cid_int, url)] = set(seen)
+        else:
+            try:
+                self.store.set_seen(cid_int, url, seen)
+            except Exception:
+                LOG.debug("set_seen failed for %s (cid=%s)", url, cid_int, exc_info=True)
+
+
+
+    async def _collect_matches_from_feed(self, f, url: str, cid_int: int, keywords: List[str]):
+        """
+        فقط برای admin-feeds (یا هر فیدی که می‌خواهیم صرفاً برای keyword scan بخوانیم).
+        آیتم‌هایی که با keywords منطبقند را در self._keyword_global_matches[cid] جمع می‌کند.
+        (این تابع تغییری در seen دیتابیس ایجاد نمی‌کند؛ ثبت در seen بعد از ارسال aggregate انجام می‌شود.)
+        """
+        if not f or not getattr(f, "entries", None):
+            return
+
+        if cid_int not in self._keyword_global_matches:
+            self._keyword_global_matches[cid_int] = {}
+            self._keyword_seen_global[cid_int] = set()
+
+        global_kw = self._keyword_global_matches[cid_int]
+        seen_global = self._keyword_seen_global[cid_int]
+
+        cap = int(getattr(settings, "rss_max_items_per_feed", 10))
+        entries = (getattr(f, "entries", []) or [])[:cap]
+
+        for e in entries:
+            eid = self.entry_id(e) if "trends.google.com" not in url else f"trend:{(getattr(e,'title','') or '').strip()}"
+            if not eid or eid in seen_global:
+                continue
+
+            # Skip if DB already marked seen for this feed (avoid collecting duplicates)
+            try:
+                db_seen = self._get_seen_safe(cid_int, url)
+                if eid in db_seen:
+                    seen_global.add(eid)
+                    continue
+            except Exception:
+                db_seen = set()
+
+            title = getattr(e, "title", "") or ""
+            desc = getattr(e, "summary", "") or getattr(e, "description", "") or ""
+            text = f"{title}\n{desc}"
+
+            for k in keywords:
+                if re.search(rf"(?<!\w){re.escape(k)}(?!\w)", text, re.IGNORECASE):
+                    global_kw.setdefault(k, []).append((eid, e, f, url))
+                    seen_global.add(eid)
+                    # mark seen in safe storage (for admin feeds goes to admin cache, for user feeds to store)
+                    try:
+                        db_seen.add(eid)
+                        self._set_seen_safe(cid_int, url, db_seen)
+                    except Exception:
+                        LOG.debug("failed to set admin cache seen for %s (cid=%s)", url, cid_int, exc_info=True)
+                    break
+
+
     async def _process_feed(self, app: Application, cid_int: int, url: str, f, chat_lang: str, reporter):
         """
         پردازش یک فید (فید از قبل با _fetch_feed گرفته شده و پارس شده).
@@ -506,11 +609,73 @@ class RSSService:
         """
         # ⏩ چک کن ببین هنوز feed برای این کاربر هست یا نه
         current_feeds = set(self.store.list_feeds(cid_int))
-        if url not in current_feeds:
+        keywords_exist = bool(self.store.list_keywords(cid_int))
+
+
+        # ✅ اگر فید در دیتابیس نیست و نه در admin_feeds است و نه keyword داریم → skip
+        if url not in current_feeds and url not in ADMIN_FEEDS and not keywords_exist:
             LOG.info("⏩ skipping %s for chat=%s because feed was removed", url, cid_int)
             return
 
+
         try:
+            
+            keywords = [k["keyword"].lower() for k in self.store.list_keywords(cid_int)]
+            seen = set(self.store.get_seen(cid_int, url))
+            cap = int(getattr(settings, "rss_max_items_per_feed", 10))
+
+            # build list of new entries ONCE (fix: avoid nested reinit bug)
+            # build list of new entries ONCE (fix: avoid nested reinit bug)
+            cap = int(getattr(settings, "rss_max_items_per_feed", 10))
+            entries = (getattr(f, "entries", []) or [])[:cap]
+            new_entries: List[Tuple[str, object]] = []
+            for e in entries:
+                eid = self.entry_id(e) if "trends.google.com" not in url else f"trend:{(getattr(e,'title','') or '').strip()}"
+                if not eid:
+                    continue
+                # check DB/cached seen safely
+                seen_db = self._get_seen_safe(cid_int, url)
+                if eid in seen_db:
+                    continue
+                new_entries.append((eid, e))
+
+            # اگر keywords تعریف شده — موارد مرتبط را در cache جمع کن (برای ارسال aggregate بعداً)
+            if keywords:
+                if cid_int not in self._keyword_global_matches:
+                    self._keyword_global_matches[cid_int] = {}
+                    self._keyword_seen_global[cid_int] = set()
+
+                global_kw = self._keyword_global_matches[cid_int]
+                seen_global = self._keyword_seen_global[cid_int]
+
+                is_admin_feed = url in ADMIN_FEEDS
+                is_user_feed = url in current_feeds
+
+                for eid, e in new_entries:
+                    if eid in seen_global:
+                        continue
+
+                    title = getattr(e, "title", "") or ""
+                    desc = getattr(e, "summary", "") or getattr(e, "description", "") or ""
+                    text = f"{title}\n{desc}"
+
+                    # check against keywords (use re.escape to be safe)
+                    for k in keywords:
+                        if re.search(rf"(?<!\w){re.escape(k)}(?!\w)", text, re.IGNORECASE):
+                            # also skip if DB already has this entry marked seen (avoid duplicates)
+                            db_seen = self._get_seen_safe(cid_int, url)
+                            if eid in db_seen:
+                                seen_global.add(eid)
+                                break
+                            global_kw.setdefault(k, []).append((eid, e, f, url))
+                            seen_global.add(eid)
+                            break
+
+                # If this is an admin feed — collect only, do not continue to send per-entry messages
+                if is_admin_feed and not is_user_feed:
+                    return
+
+
             # Google Trends
             if "trends.google.com/trending/rss" in url:
                 html = await google_trends.process_google_trends(f, self.store, cid_int, url)
@@ -697,164 +862,7 @@ class RSSService:
 
         except Exception as ex:
             LOG.exception("process_feed error for %s (cid=%s): %s", url, cid_int, ex)
-            
 
-    # ------------------------------------------------------------------ #
-    # Main poll
-    # ------------------------------------------------------------------ #
-    # async def poll_once(self, app: Application):
-    #     self.stats = {"sent": 0, "skipped": 0, "reasons": {}}
-
-    #     reporter = app.bot_data.get("reporter")
-    #     for cid, st in self.store.iter_chats():
-    #         try:
-    #             cid_int = int(cid)
-    #         except Exception:
-    #             try:
-    #                 cid_int = int(st.get("chat_id") or 0)
-    #             except Exception:
-    #                 continue
-
-    #         # زبان چت و تنظیم برای Summarizer
-    #         try:
-    #             chat_lang = get_chat_lang(self.store, cid_int)
-    #             try:
-    #                 self.summarizer.prompt_lang = chat_lang
-    #             except Exception:
-    #                 pass
-    #         except Exception:
-    #             chat_lang = "fa"
-
-    #         feeds: Iterable[str] = list(st.get("feeds", []))
-    #         random.shuffle(feeds)   # ✅ ترتیب فیدها هر بار رندوم میشه
-
-    #         for url in feeds:
-    #             print("💣this is the target ====",url)
-    #             url = ensure_scheme(url)
-    #             try:
-    #                 # مسیر RSS
-    #                 f = await self._fetch_feed(url)
-    #                 if "trends.google.com/trending/rss" in url:
-    #                     html = await google_trends.process_google_trends(f, self.store, cid_int, url)
-    #                     if html:
-    #                         await app.bot.send_message(
-    #                             chat_id=cid_int,
-    #                             text=html,
-    #                             parse_mode="HTML",
-    #                             disable_web_page_preview=True,
-    #                         )
-    #                     continue
-
-    #                 if f and getattr(f, "entries", None):
-    #                     seen = set(self.store.get_seen(cid_int, url))
-    #                     new_entries = []
-    #                     cap = int(getattr(settings, "rss_max_items_per_feed", 10))
-    #                     for e in f.entries[:cap]:
-    #                         if "trends.google.com" in url:
-    #                             eid = f"trend:{getattr(e, 'title', '').strip()}"
-    #                         else:
-    #                             eid = self.entry_id(e)                            
-    #                         if not eid or eid in seen:
-    #                             continue
-    #                         new_entries.append((eid, e))
-
-    #                     feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
-    #                     for eid, e in reversed(new_entries):
-    #                         html = await format_entry(feed_title, e, self.summarizer, url, lang=chat_lang)
-    #                         if not html or not str(html).strip():
-    #                             reason = "ai_empty_output"
-    #                             self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
-    #                             self.stats["skipped"] += 1
-    #                             continue
-
-    #                         await app.bot.send_message(
-    #                             chat_id=cid_int,
-    #                             text=html,
-    #                             parse_mode="HTML",
-    #                             disable_web_page_preview=True,
-    #                         )
-    #                         self.stats["sent"] += 1
-    #                         seen.add(eid)
-
-    #                     self.store.set_seen(cid_int, url, seen)
-    #                     continue  # RSS مسیر کامل شد؛ به URL بعدی برو
-
-    #                 # --- مسیر Page‑Watch (خلاصه‌ساز یکپارچه) ---
-    #                 page_html = await self._get_html(url)
-    #                 if not page_html:
-    #                     continue
-
-    #                 listing_limit = int(getattr(settings, "pagewatch_listing_limit", 30))
-    #                 links = self._extract_listing_links(url, page_html, limit=listing_limit)
-    #                 if not links:
-    #                     continue
-
-    #                 seen = set(self.store.get_seen(cid_int, url))
-    #                 per_cycle = int(getattr(settings, "pagewatch_links_per_cycle", 3))
-    #                 new_links = [u for u in links if u not in seen][:per_cycle]
-    #                 if not new_links:
-    #                     continue
-
-    #                 feed_title = urlparse(url).netloc or url
-    #                 for link in reversed(new_links):
-    #                     # برای عنوان و متن مقاله
-    #                     title_html = await self._get_html(link)
-    #                     title = self._page_title(title_html, fallback=urlparse(link).path or link)
-
-    #                     # متن مقاله: اول از fetcher (تمیز و آماده‌ی خلاصه‌سازی)
-    #                     article_text = await fetch_article_text(
-    #                         link, timeout=int(getattr(settings, "fetcher_timeout", 12))
-    #                     )
-    #                     if not article_text:
-    #                         # اگر نشد، حداقل متن خام صفحه را به Summarizer بدهیم تا Lite بسازد
-    #                         try:
-    #                             soup = BeautifulSoup(title_html or "", "html.parser")
-    #                             for tnode in soup(["script", "style", "noscript"]):
-    #                                 tnode.decompose()
-    #                             article_text = (soup.get_text(" ", strip=True) or title).strip()
-    #                         except Exception:
-    #                             article_text = title or link
-
-    #                     html = await format_article(
-    #                         feed_title=feed_title,
-    #                         title=title,
-    #                         link=link,
-    #                         text=article_text,
-    #                         summarizer=self.summarizer,
-    #                         lang=chat_lang,
-    #                     )
-    #                     if not html or not str(html).strip():
-    #                         reason = "article_empty_output"
-    #                         self.stats["reasons"][reason] = self.stats["reasons"].get(reason, 0) + 1
-    #                         self.stats["skipped"] += 1
-    #                     try:
-    #                         await app.bot.send_message(
-    #                             chat_id=cid_int,
-    #                             text=html,
-    #                             parse_mode="HTML",
-    #                             disable_web_page_preview=True,
-    #                         )
-    #                         self.stats["sent"] += 1
-    #                         seen.add(link)
-    #                     except Exception:
-    #                         LOG.debug("send_message failed for %s", link, exc_info=True)
-
-    #                 self.store.set_seen(cid_int, url, seen)
-
-    #             except Exception as ex:
-    #                 LOG.exception("poll_once error for %s: %s", url, ex)
-
-    #     # ---- لاگ آمار یک‌بار در انتهای poll_once
-    #     total = self.stats["sent"] + self.stats["skipped"]
-    #     if total:
-    #         ratio = round(100 * self.stats["skipped"] / total, 1)
-    #         LOG.info(
-    #             "[SUMMARY][STATS] sent=%d skipped=%d (%.1f%%) reasons=%s",
-    #             self.stats["sent"],
-    #             self.stats["skipped"],
-    #             ratio,
-    #             self.stats["reasons"],
-    #         )
 
     async def poll_once(self, app: Application):
         reporter = app.bot_data.get("reporter")
@@ -880,31 +888,30 @@ class RSSService:
             except Exception:
                 chat_lang = "fa"
 
-            feeds: list[str] = self.store.list_feeds(cid_int)  # ✅ مستقیم از دیتابیس
-            if not feeds:
+            # --- آماده سازی فیدهای کاربر و کاندیدهای ادمین (ادمین فقط برای اسکن کی‌ورد) ---
+            user_feeds: list[str] = list(self.store.list_feeds(cid_int))
+            keywords = [k["keyword"].lower() for k in self.store.list_keywords(cid_int)]
+            admin_candidates: list[str] = ADMIN_FEEDS.copy() if (keywords and ADMIN_FEEDS) else []
+
+            # اگر نه فید کاربر داریم و نه کی‌ورد، رد شو
+            if not user_feeds and not keywords:
                 continue
 
-            random.shuffle(feeds)
-
-            # دوباره از store گرفتن، نه از state قدیمی
+            # ترتیب و cursor فقط روی user_feeds اعمال می‌شود
+            user_feeds = sorted(user_feeds)
             start = self._cursor_per_chat.get(cid_int, 0)
             batch_size = int(getattr(settings, "rss_batch_size", 20))
-            if start >= len(feeds):
+            if start >= len(user_feeds):
                 start = 0
-            end = min(len(feeds), start + batch_size)
-
-            # ✅ batch کاملاً sync با دیتابیس
-            batch = feeds[start:end]
-
-            next_index = end if end < len(feeds) else 0
+            end = min(len(user_feeds), start + batch_size)
+            batch_user = user_feeds[start:end]
+            next_index = end if end < len(user_feeds) else 0
             self._cursor_per_chat[cid_int] = next_index
 
+            LOG.info("Polling chat=%s user_feeds_total=%d batch=%d (start=%d next=%d) admin_candidates=%d",
+                     cid_int, len(user_feeds), len(batch_user), start, next_index, len(admin_candidates))
 
-
-            LOG.info("Polling chat=%s feeds_total=%d batch=%d (start=%d next=%d)",
-                     cid_int, len(feeds), len(batch), start, next_index)
-
-            # concurrency limiter برای fetch ها
+            # concurrency limiter
             concurrency = int(getattr(settings, "rss_fetch_concurrency", 6))
             sem = asyncio.Semaphore(concurrency)
 
@@ -916,47 +923,152 @@ class RSSService:
                         LOG.debug("fetch failed for %s: %s", u, ex)
                         return None
 
-            # WITH RSS            
-            fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in batch]
+            # fetch user feeds (برای پردازش عادی)
+            fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in batch_user]
             results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
 
-            # برای هر فید که با موفقیت گرفته شده، یک task پردازش ایجاد کن
             proc_tasks = []
-            # اضافه کردن چک در اینجا
             current_feeds = set(self.store.list_feeds(cid_int))
-            for url, res in zip(batch, results):
+
+            # پردازش فیدهای کاربر:
+            # - اگر parse شد: _process_feed با f
+            # - اگر parse نشد: چک کن providerها را؛ اگر one matches -> call _process_feed(..., None)
+            for url, res in zip(batch_user, results):
                 if isinstance(res, Exception) or not res:
-                    LOG.debug("No feed parsed for %s (chat=%s): %s", url, cid_int, res)
+                    # ممکنه فید نباشه؛ بررسی provider ها (مثال: custom providers مثل vipgold)
+                    matched = False
+                    for matcher, fn in PROVIDERS:
+                        try:
+                            if matcher(url):
+                                proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, None, chat_lang, reporter)))
+                                matched = True
+                                break
+                        except Exception:
+                            LOG.exception("provider matcher failed for %s", url)
+                    if not matched:
+                        LOG.debug("No feed parsed and no provider matched for %s (chat=%s): %s", url, cid_int, res)
                     continue
 
-                if url not in current_feeds:
-                    LOG.info("⏩ feed %s skipped because removed from db", url)
-                    continue
-
-                # پردازش را موازی اجرا کن (هر پردازش خودش ارسال را انجام می‌دهد)
+                # normal processing for user feeds (this will both send messages and collect keyword matches for user feeds)
                 proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, res, chat_lang, reporter)))
 
-            # منتظر بمون که همه پردازش‌ها تموم بشن (اگر proc_tasks خالی بود همین خط سریع رد میشه)
+            # --- اگر کی‌ورد هست، اسکن ادمین‌ها برای کی‌وردها (فقط جمع‌آوری matches، نه ارسال per-entry) ---
+            admin_scan_tasks = []
+            if keywords and admin_candidates:
+                admin_fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in admin_candidates]
+                admin_results = await asyncio.gather(*admin_fetch_tasks, return_exceptions=True)
+                for url, res in zip(admin_candidates, admin_results):
+                    if isinstance(res, Exception) or not res:
+                        LOG.debug("No admin feed parsed for %s (chat=%s): %s", url, cid_int, res)
+                        continue
+                    # collect matches from admin feeds (do NOT call _process_feed on them)
+                    admin_scan_tasks.append(asyncio.create_task(self._collect_matches_from_feed(res, url, cid_int, keywords)))
+
+            # منتظر بمون که همه پردازش‌های فید کاربر تموم بشن
             if proc_tasks:
                 await asyncio.gather(*proc_tasks, return_exceptions=True)
-            
-            # WITH NO RSS
-            for url in batch:
-                matched = False
-                for matcher, fn in PROVIDERS:
-                    if matcher(url):
-                        proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, None, chat_lang, reporter)))
-                        matched = True
-                        break
-                if matched:
-                    continue
 
-                res = await _fetch_with_sem(url)
-                if not res:
-                    continue
-                proc_tasks.append(asyncio.create_task(self._process_feed(app, cid_int, url, res, chat_lang, reporter)))
-            
+            # منتظر بمون که اسکن ادمین‌ها تموم شه
+            if admin_scan_tasks:
+                await asyncio.gather(*admin_scan_tasks, return_exceptions=True)
 
+            # --- ارسال نهایی همه‌ی نتایج keywordها پس از پردازش همه‌ی فیدها (کاربر + admin scans) ---
+            if cid_int in self._keyword_global_matches:
+                from bs4 import BeautifulSoup
+                
+                def is_farsi(text: str) -> bool:
+                    return bool(re.search(r"[\u0600-\u06FF]", text))
+                
+                global_kw = self._keyword_global_matches[cid_int]
+                for kw, matches in list(global_kw.items()):
+                    if not matches:
+                        continue
+
+                    # filter out items already marked seen in DB (to avoid duplicates)
+                    filtered = list(matches)
+
+                    if not filtered:
+                        continue
+
+                    # دسته‌بندی برای جلوگیری از طول زیاد پیام
+                    chunks = [filtered[i:i+10] for i in range(0, len(filtered), 10)]
+                    for chunk in chunks:
+                        # 🈯️ دو زبانه: بسته به زبان کلیدواژه
+                        if is_farsi(kw):
+                            header = f"{len(chunk)} نتیجه جدید برای #{kw}\n\n"
+                        else:
+                            header = f"{len(chunk)} new results for #{kw.capitalize()}\n\n"     
+                                               
+                        parts = []
+                        for i, (eid, e, f, url) in enumerate(chunk, start=1):
+                            title = getattr(e, "title", "") or ""
+                            link = getattr(e, "link", "") or ""
+                            feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
+                            date = _fmt_date(e)
+
+                            raw_snippet = getattr(e, "summary", "") or getattr(e, "description", "") or ""
+                            clean_snippet = BeautifulSoup(raw_snippet, "html.parser").get_text(" ", strip=True)
+                            clean_snippet = re.sub(r"\s+", " ", clean_snippet).strip()[:400]
+
+                            # زمان نسبی انتشار
+                            published_dt = None
+                            if getattr(e, "published_parsed", None):
+                                published_dt = datetime.fromtimestamp(time.mktime(e.published_parsed), tz=timezone.utc)
+                            elif getattr(e, "updated_parsed", None):
+                                published_dt = datetime.fromtimestamp(time.mktime(e.updated_parsed), tz=timezone.utc)
+
+                            if published_dt:
+                                delta = datetime.now(timezone.utc) - published_dt
+                                rel_time = humanize.naturaltime(delta).replace("from now", "ago")
+                                time_str = f"🕒 {rel_time}"
+                            else:
+                                time_str = ""
+ 
+                            clean_snippet = BeautifulSoup(raw_snippet, "html.parser").get_text(" ", strip=True)
+                            clean_snippet = re.sub(r"\s+", " ", clean_snippet).strip()[:400]  
+                                                          
+                            if clean_snippet:
+                                snippet_part = f"📌 {esc(clean_snippet)}\n"
+                            else:
+                                snippet_part = ""
+                            part = (
+                                f"{i}\u20e3 <b>{esc(title)}</b>\n"
+                                f"{esc(feed_title)} | {esc(date)}\n\n"
+                                f"{snippet_part}"
+                                f"🔗 <a href=\"{esc_attr(link)}\">Source</a>   {time_str}\n\n"
+                            )
+                            parts.append(part)
+
+                        msg = header + "\n".join(parts)
+                        try:
+                            await app.bot.send_message(
+                                chat_id=cid_int,
+                                text=msg,
+                                parse_mode="HTML",
+                                disable_web_page_preview=True,
+                            )
+                        except Exception:
+                            LOG.debug("send keyword aggregate failed for cid=%s kw=%s", cid_int, kw, exc_info=True)
+
+                        # بعد از ارسال، همه‌ی آیتم‌های chunk رو در seen ثبت کن تا دورِ بعدی تکراری نیاد
+                        # بعد از ارسال، فقط برای فیدهایی که کاربر واقعاً آنها را دارد در DB ثبت کن.
+                        # (تا admin feeds به لیست لینک‌های کاربر اضافه نشوند)
+                        for _, e, _, url in chunk:
+                            eid = self.entry_id(e)
+                            try:
+                                seen = self._get_seen_safe(cid_int, url)
+                                seen.add(eid)
+                                self._set_seen_safe(cid_int, url, seen)
+                            except Exception:
+                                LOG.debug("failed to persist keyword-seen for %s (cid=%s)", url, cid_int, exc_info=True)
+
+
+
+                        self.stats["sent"] += len(chunk)
+
+                # پاک‌سازی بعد از ارسال
+                self._keyword_global_matches[cid_int].clear()
+                self._keyword_seen_global[cid_int].clear()
 
         # لاگ کلی آمار
         total = self.stats["sent"] + self.stats["skipped"]

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="fa">
+<head>
+  <meta charset="UTF-8">
+  <title>پرداخت موفق</title>
+  <style>
+    body {font-family: Tahoma; background: linear-gradient(135deg,#56ab2f,#a8e063); display:flex; align-items:center; justify-content:center; height:100vh; margin:0;}
+    .card {background:#fff; padding:30px; border-radius:15px; box-shadow:0 8px 20px rgba(0,0,0,.2); text-align:center; max-width:400px;}
+    h2 {color:#2e7d32;}
+    .ref {margin-top:10px; font-size:14px; color:#444;}
+    .btn {display:inline-block; margin-top:20px; padding:12px 24px; background:#43a047; color:#fff; border-radius:10px; text-decoration:none; font-weight:bold;}
+    .btn:hover {opacity:.8;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>✅ پرداخت موفق</h2>
+    <p>پرداخت شما با موفقیت انجام شد.</p>
+    <div class="ref">کد رهگیری: {{ ref_id }}</div>
+    <a href="https://t.me/Xminit_bot" class="btn">بازگشت به ربات</a>
+  </div>
+</body>
+</html>

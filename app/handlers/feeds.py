@@ -21,17 +21,33 @@ from app.config import settings  # تنظیمات برای Ephemeral و ...
 from . import basic
 from .lang import cmd_lang
 from .list import cmd_list
+from app.utils.decorators import premium_only
+
 # --- State(s) for /add conversation
 WAITING_FOR_URL = 1
 WAITING_FOR_REMOVE_URL = 202
 
 def _is_probably_url(s: str) -> bool:
+    """
+    Checks if input looks like a real URL.
+    Avoids treating plain words (like 'apple' or '') as URLs.
+    """
+    s = (s or "").strip()
+    if not s:
+        return False
+
+    # اگر کاربر فقط کلمه نوشته بدون نقطه، این URL نیست
+    if "." not in s:
+        return False
+
     try:
-        u = ensure_scheme((s or "").strip())
+        u = ensure_scheme(s)
         p = urlparse(u)
-        return bool(p.scheme in ("http", "https") and p.netloc)
+        # scheme باید http/https باشه و netloc حداقل شامل نقطه باشه
+        return bool(p.scheme in ("http", "https") and "." in (p.netloc or ""))
     except Exception:
         return False
+
 
 
 def _canon(url: str) -> str:
@@ -61,30 +77,36 @@ async def cmd_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     chat_id = update.effective_chat.id
     lang = get_chat_lang(context.bot_data["store"], chat_id)
-
-    sent = await update.effective_message.reply_text(t("add.ask_site", lang))
+    text = t("add.ask_input", lang)
+    if text == "add.ask_input":
+        text = "🔗 Send a website link or a keyword to track:" if lang == "en" else "🔗 لینک سایت یا کلمه‌ای برای پیگیری بفرست:"
+    sent = await update.effective_message.reply_text(text)
     await _maybe_auto_delete(context, chat_id, sent.message_id)
     return WAITING_FOR_URL
 
 
 async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """
-    Step 2: receive user's site URL, try to discover RSS; if not found, enable Page-Watch.
-    """
     store = context.bot_data["store"]
     rss = context.bot_data["rss"]
-    search = context.bot_data.get("search")  # ممکن است در این لحظه هنوز کامل نباشد
+    search = context.bot_data.get("search")
 
     chat_id = update.effective_chat.id
     lang = get_chat_lang(store, chat_id)
-
     raw = (update.effective_message.text or "").strip()
-    if not _is_probably_url(raw):
-        msg = await update.effective_message.reply_text(t("add.invalid_url", lang))
-        await _maybe_auto_delete(context, chat_id, msg.message_id)
-        return WAITING_FOR_URL
 
-    # Ack موقت: در حال بررسی لینک…
+    # ----------- Keyword Mode -----------
+    if not _is_probably_url(raw):
+        # اگر فقط متن ساده بود → به‌عنوان keyword ذخیره کن
+        store.add_keyword(chat_id, raw)
+        store.mark_action(chat_id)
+        msg = t("add.keyword_added", lang)
+        if msg == "add.keyword_added":
+            msg = "✅ Keyword added!" if lang == "en" else "✅ کلمه کلیدی اضافه شد!"
+        sent = await update.effective_message.reply_text(msg)
+        await _maybe_auto_delete(context, chat_id, sent.message_id)
+        return ConversationHandler.END
+
+    # ----------- URL Mode -----------
     ack_msg = await update.effective_message.reply_text(t("add.checking", lang))
     await _maybe_auto_delete(context, chat_id, ack_msg.message_id)
 
@@ -92,15 +114,13 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     # Our links 
     if "/vip/goldir" in site.lower():
-        store.add_feed(chat_id, site)
         if store.add_feed(chat_id, site):
             store.mark_action(chat_id)
             await update.effective_message.reply_text(t("add.added_feed", lang))
         else: 
-            m = await update.effective_message.reply_text(t("add.already_added", lang))
+            await update.effective_message.reply_text(t("add.already_added", lang))
         return ConversationHandler.END
 
-    # 1) اگر خودِ ورودی RSS معتبر بود (کاربر حرفه‌ای)، مستقیم اضافه کن
     try:
         if await rss.is_valid_feed(site):
             if store.add_feed(chat_id, site):
@@ -111,14 +131,12 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await _maybe_auto_delete(context, chat_id, m.message_id)
             return ConversationHandler.END
     except Exception:
-        # ادامهٔ مسیر دیسکاوری
         pass
 
-    # 2) تلاش برای کشف RSS
     best = None
     try:
         if search and hasattr(search, "discover_rss"):
-            best = await search.discover_rss(site)  # services/search.py
+            best = await search.discover_rss(site)
             if best:
                 best = _canon(best)
     except Exception:
@@ -135,10 +153,8 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await _maybe_auto_delete(context, chat_id, m.message_id)
                 return ConversationHandler.END
         except Exception:
-            # سقوط به Page‑Watch
             pass
 
-    # 3) اگر RSS پیدا نشد یا معتبر نبود → Page-Watch روی خود سایت
     try:
         if store.add_feed(chat_id, site):
             store.mark_action(chat_id)
@@ -150,6 +166,7 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     await _maybe_auto_delete(context, chat_id, m.message_id)
     return ConversationHandler.END
+
 
 
 async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -207,11 +224,10 @@ async def cmd_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """
     chat_id = update.effective_chat.id
     lang = get_chat_lang(context.bot_data["store"], chat_id)
-
-    sent = await update.effective_message.reply_text(
-        t("remove.ask_site", lang) if t("remove.ask_site", lang) != "remove.ask_site"
-        else ("Send the site URL to remove:" if lang == "en" else "🔗 لینک سایت برای حذف بده:")
-    )
+    msg = t("remove.ask_input", lang)
+    if msg == "remove.ask_input":
+        msg = "Send the site URL or keyword to remove:" if lang == "en" else "🔗 لینک سایت یا کلمه‌ای که می‌خوای حذف کنی بفرست:"
+    sent = await update.effective_message.reply_text(msg)
     await _maybe_auto_delete(context, chat_id, sent.message_id)
     return WAITING_FOR_REMOVE_URL
 
@@ -223,20 +239,29 @@ async def handle_remove_url(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     store = context.bot_data["store"]
     chat_id = update.effective_chat.id
     lang = get_chat_lang(store, chat_id)
+    raw = (update.effective_message.text or "").strip()
 
-    url = _canon(update.message.text.strip())
-    try:
+    ok = False
+    if _is_probably_url(raw):
+        url = _canon(raw)
         ok = store.remove_feed(chat_id, url)
-    except Exception:
-        ok = False
+    else:
+        keywords = store.list_keywords(chat_id)
+        for idx, k in enumerate(keywords, start=1):
+            if k["keyword"].lower() == raw.lower():
+                ok = store.remove_keyword(chat_id, idx)
+                break
 
     if ok:
-        text = t("sys.removed", lang)
+        msg = t("sys.removed", lang)
+        if msg == "sys.removed":
+            msg = "✅ Removed." if lang == "en" else "✅ حذف شد."
     else:
-        nf = t("remove.not_found", lang)
-        text = nf if nf != "remove.not_found" else ("Not found." if lang == "en" else "❌ پیدا نشد.")
+        msg = t("remove.not_found", lang)
+        if msg == "remove.not_found":
+            msg = "❌ Not found." if lang == "en" else "❌ پیدا نشد."
 
-    sent = await update.message.reply_text(text)
+    sent = await update.effective_message.reply_text(msg)
     await _maybe_auto_delete(context, chat_id, sent.message_id)
     return ConversationHandler.END
 
@@ -299,32 +324,27 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_chat_lang(store, chat_id)
 
     feeds = store.list_feeds(chat_id)
-    if not feeds:
-        sent = await update.message.reply_text(t("list.empty", lang))
+    keywords = store.list_keywords(chat_id)
+    if not feeds and not keywords:
+        msg = t("list.empty", lang)
+        sent = await update.message.reply_text(msg)
         await _maybe_auto_delete(context, chat_id, sent.message_id)
         return
 
-    body = "\n".join(f"{i+1}. {u}" for i, u in enumerate(feeds))
-    msg = f"{t('list.title', lang)}\n{body}"
+    msg_parts = []
+    if feeds:
+        msg_parts.append(t("list.feeds", lang) + ":\n" + "\n".join(f"{i+1}. {f}" for i, f in enumerate(feeds)))
+    if keywords:
+        msg_parts.append(t("list.keywords", lang) + ":\n" + "\n".join(f"{i+1}. {k['keyword']}" for i, k in enumerate(keywords)))
 
-    # دکمه‌ها با i18n
+    msg = "\n\n".join(msg_parts)
     keyboard = [
-        [
-            InlineKeyboardButton(t("btn.add", lang), callback_data="list:add"),
-            InlineKeyboardButton(t("btn.remove", lang), callback_data="list:remove"),
-        ],
-        [
-            InlineKeyboardButton(t("btn.clear", lang), callback_data="list:clear"),
-        ]
+        [InlineKeyboardButton(t("btn.add", lang), callback_data="list:add"),
+         InlineKeyboardButton(t("btn.remove", lang), callback_data="list:remove")],
+        [InlineKeyboardButton(t("btn.clear", lang), callback_data="list:clear")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-
-    sent = await update.message.reply_text(
-        msg,
-        parse_mode="HTML",
-        disable_web_page_preview=True,
-        reply_markup=reply_markup
-    )
+    sent = await update.message.reply_text(msg, reply_markup=reply_markup, disable_web_page_preview=True)
     await _maybe_auto_delete(context, chat_id, sent.message_id)
 
 

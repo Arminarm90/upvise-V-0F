@@ -534,10 +534,21 @@ class SQLiteStateStore:
             cur.execute("SELECT 1 FROM chats WHERE chat_id = ?", (cid,))
             if not cur.fetchone():
                 return False
+            # پاک کردن همه‌ی فیدها و آیتم‌های دیده‌شده
             cur.execute("DELETE FROM feeds WHERE chat_id = ?", (cid,))
             cur.execute("DELETE FROM seen WHERE chat_id = ?", (cid,))
-            # do NOT clear feeds_history
+            # ✅ پاک کردن تمام کلیدواژه‌ها هم‌زمان
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    UNIQUE(chat_id, keyword)
+                )
+            """)
+            cur.execute("DELETE FROM user_keywords WHERE chat_id = ?", (cid,))
             return True
+
 
     # --------------- seen operations ---------------
     def get_seen(self, chat_id: int | str, url: str) -> set:
@@ -700,3 +711,52 @@ class SQLiteStateStore:
                             "INSERT OR IGNORE INTO seen(chat_id, feed_url, item_id) VALUES(?, ?, ?)",
                             (str(cid), str(feed_url), str(it)),
                         )
+
+    # ---------------------- Keywords ----------------------
+    def add_keyword(self, chat_id: str, keyword: str) -> None:
+        """افزودن یک کلمه کلیدی برای کاربر"""
+        cid = str(chat_id)
+        kw = keyword.strip().lower()
+        if not kw:
+            return
+        with self._locked_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    UNIQUE(chat_id, keyword)
+                )
+            """)
+            cur.execute(
+                "INSERT OR IGNORE INTO user_keywords (chat_id, keyword) VALUES (?, ?)",
+                (cid, kw),
+            )
+
+    def list_keywords(self, chat_id: str) -> list[dict]:
+        """لیست تمام کلمات کلیدی ثبت‌شده برای کاربر"""
+        cid = str(chat_id)
+        with self._locked_cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_keywords (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    UNIQUE(chat_id, keyword)
+                )
+            """)
+            cur.execute("SELECT id, keyword FROM user_keywords WHERE chat_id=? ORDER BY id", (cid,))
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+
+    def remove_keyword(self, chat_id: str, index: int) -> bool:
+        """حذف کلمه بر اساس شماره در لیست کاربر"""
+        cid = str(chat_id)
+        with self._locked_cursor() as cur:
+            cur.execute("SELECT id FROM user_keywords WHERE chat_id=? ORDER BY id", (cid,))
+            rows = cur.fetchall()
+            if index < 1 or index > len(rows):
+                return False
+            kid = rows[index - 1]["id"]
+            cur.execute("DELETE FROM user_keywords WHERE id=?", (kid,))
+            return True
