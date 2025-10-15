@@ -559,17 +559,43 @@ class SQLiteStateStore:
             return set([row["item_id"] for row in cur.fetchall()])
 
     def set_seen(self, chat_id: int | str, url: str, seen_set: Iterable[str]) -> None:
+        """
+        ذخیره‌ی آیتم‌های seen برای هر فید.
+        برای فیدهای ادمین (دارای prefix 'seen_admin::') فقط در جدول seen ذخیره می‌کند،
+        و هرگز وارد جدول feeds نمی‌کند تا در لیست کاربر نمایش داده نشود.
+        """
         cid = str(chat_id)
         u = str(url)
+
+        # اگر فید از نوع ادمین است (دارای prefix خاص)
+        is_admin_feed = u.startswith("seen_admin::")
+
+        # اگر admin-feed نیست، حتماً در feeds هم وجود داشته باشد
         with self._locked_cursor() as cur:
-            cur.execute("INSERT OR IGNORE INTO chats(chat_id, lang) VALUES(?, ?)", (cid, "en"))
-            cur.execute("INSERT OR IGNORE INTO feeds(chat_id, url) VALUES(?, ?)", (cid, u))
-            cur.execute("DELETE FROM seen WHERE chat_id = ? AND feed_url = ?", (cid, u))
+            # اطمینان از وجود کاربر
+            cur.execute(
+                "INSERT OR IGNORE INTO chats(chat_id, lang) VALUES(?, ?)",
+                (cid, "en"),
+            )
+
+            if not is_admin_feed:
+                # فقط برای فیدهای معمولی در جدول feeds ذخیره کن
+                cur.execute(
+                    "INSERT OR IGNORE INTO feeds(chat_id, url) VALUES(?, ?)",
+                    (cid, u),
+                )
+
+            # در هر دو حالت (admin یا معمولی)، seen را به‌روز کن
+            cur.execute(
+                "DELETE FROM seen WHERE chat_id = ? AND feed_url = ?",
+                (cid, u),
+            )
             for it in (seen_set or []):
                 cur.execute(
                     "INSERT OR IGNORE INTO seen(chat_id, feed_url, item_id) VALUES(?, ?, ?)",
                     (cid, u, str(it)),
                 )
+
 
     # --------------- username helpers ---------------
     def set_username(self, chat_id: int | str, username: Optional[str]) -> None:

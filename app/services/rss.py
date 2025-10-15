@@ -513,42 +513,43 @@ class RSSService:
 
         return header + "\n".join(body_parts).strip()
 
-    def _get_seen_safe(self, cid_int: int, url: str) -> set:
+    def _get_seen_safe(self, chat_id: int, url: str) -> set[str]:
         """
-        خواندن seen برای یک feed به‌صورت امن:
-        - اگر url در ADMIN_FEEDS باشد و کاربر آن را در list_feeds نداشته باشد،
-          از کش محلی استفاده کن (تا به دیتابیس فید اضافه نشود).
-        - در غیر این صورت از store.get_seen استفاده کن.
+        خواندن داده‌های seen.
+        برای admin-feeds از prefix خاص در DB استفاده می‌شود تا بعد از ری‌استارت تکراری نشود،
+        ولی وارد جدول feeds کاربر نشود.
         """
-        try:
-            user_has = url in set(self.store.list_feeds(cid_int))
-        except Exception:
-            user_has = False
+        cid = str(chat_id)
 
-        if url in ADMIN_FEEDS and not user_has:
-            return set(self._admin_seen_cache.get((cid_int, url), set()))
+        # فید ادمین → کلید جدا در جدول seen
+        if url in ADMIN_FEEDS or url.startswith("admin::"):
+            safe_key = f"seen_admin::{url}"
+        else:
+            safe_key = url
+
         try:
-            return set(self.store.get_seen(cid_int, url))
+            return set(self.store.get_seen(cid, safe_key))
         except Exception:
             return set()
 
-    def _set_seen_safe(self, cid_int: int, url: str, seen: set) -> None:
+    def _set_seen_safe(self, chat_id: int, url: str, seen: set[str]) -> None:
         """
-        نوشتن seen به‌صورت امن (مشابه توضیح بالا).
+        ذخیره‌ی داده‌های seen:
+        برای admin-feeds در DB با prefix جدا ذخیره می‌شود (بدون ورود به جدول feeds).
         """
-        try:
-            user_has = url in set(self.store.list_feeds(cid_int))
-        except Exception:
-            user_has = False
+        cid = str(chat_id)
 
-        if url in ADMIN_FEEDS and not user_has:
-            # فقط داخل کش محلی نگهدار تا به دیتابیس کاربر اضافه نشه
-            self._admin_seen_cache[(cid_int, url)] = set(seen)
+        if url in ADMIN_FEEDS or url.startswith("admin::"):
+            safe_key = f"seen_admin::{url}"
         else:
-            try:
-                self.store.set_seen(cid_int, url, seen)
-            except Exception:
-                LOG.debug("set_seen failed for %s (cid=%s)", url, cid_int, exc_info=True)
+            safe_key = url
+
+        try:
+            # این فقط جدول seen رو آپدیت می‌کنه، جدول feeds رو تغییر نمی‌ده
+            self.store.set_seen(cid, safe_key, seen)
+        except Exception:
+            pass
+
 
 
 
@@ -994,7 +995,7 @@ class RSSService:
                     chunks = [filtered[i:i+10] for i in range(0, len(filtered), 10)]
                     for chunk in chunks:
                         # 🈯️ دو زبانه: بسته به زبان کلیدواژه
-                        if is_farsi(kw):
+                        if chat_lang == "fa":
                             header = f"{len(chunk)} نتیجه جدید برای #{kw}\n\n"
                         else:
                             header = f"{len(chunk)} new results for #{kw.capitalize()}\n\n"     
