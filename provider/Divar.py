@@ -703,7 +703,8 @@ async def process_divar(store, cid_int, url: str, chat_lang) -> str:
         price = _escape_md(ad.get("price", "—"))
         loc = _escape_md(ad.get("location", "—"))
         mileage = _escape_md(ad.get("mileage", ""))
-        url_md = ad["url"]
+        url_md = ad["url"].replace(")", "\\)").replace("(", "\\(")
+
 
         part = (
             f"{num_emoji} *{title}*\n"
