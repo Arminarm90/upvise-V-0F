@@ -37,7 +37,7 @@ from ..utils.text import html_escape as esc, html_attr_escape as esc_attr
 from ..utils.i18n import t as _t
 
 # sites 
-from provider import google_trends, remoteok
+from provider import google_trends, remoteok, Divar
 from provider.vipgold import process_gold, process_news, collect_gold, process_gold_and_news
 
 import yaml
@@ -77,6 +77,7 @@ LOG = logging.getLogger("rss")
 # Macher list 
 PROVIDERS = [
     (lambda u: "xminit.com/vip/goldir" in (u or "").lower(), process_gold_and_news),
+    (lambda url: "divar.ir/s/" in url, Divar.process_divar),
 ]
 
 # Admin sites 

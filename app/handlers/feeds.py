@@ -120,6 +120,14 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else: 
             await update.effective_message.reply_text(t("add.already_added", lang))
         return ConversationHandler.END
+    
+    if "divar.ir/s/" in site.lower():
+        if store.add_feed(chat_id, site):
+            store.mark_action(chat_id)
+            await update.effective_message.reply_text(t("add.added_feed", lang))
+        else: 
+            await update.effective_message.reply_text(t("add.already_added", lang))
+        return ConversationHandler.END
 
     try:
         if await rss.is_valid_feed(site):
@@ -325,6 +333,10 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     feeds = store.list_feeds(chat_id)
     keywords = store.list_keywords(chat_id)
+
+    # ✅ فیلتر کردن کلیدهای داخلی مثل divar_seen::
+    feeds = [f for f in feeds if not f.startswith("divar_seen::")]
+
     if not feeds and not keywords:
         msg = t("list.empty", lang)
         sent = await update.message.reply_text(msg)
@@ -346,6 +358,7 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     sent = await update.message.reply_text(msg, reply_markup=reply_markup, disable_web_page_preview=True)
     await _maybe_auto_delete(context, chat_id, sent.message_id)
+
 
 
 # -------------------------
