@@ -557,13 +557,13 @@ def render_title_only(
     if (lang or "").lower().startswith("fa"):
         L = {
             "source": "منبع",
-            "flash_footer": "⚡ Flash | Quick View",
+            # "flash_footer": "⚡ Flash | Quick View",
             "anchor_source": "🔗",
         }
     else:
         L = {
             "source": "Source",
-            "flash_footer": "⚡ Flash | Quick View",
+            # "flash_footer": "⚡ Flash | Quick View",
             "anchor_source": "🔗",
         }
 
@@ -591,9 +591,9 @@ def render_title_only(
     if src_link:
         src_line = f'<a href="{html.escape(src_link)}">{html.escape(L["anchor_source"])} {html.escape(L["source"])}</a>\n'
 
-    footer = L["flash_footer"]
+    # footer = L["flash_footer"]
 
-    return header + summary_block + src_line + "\n" + footer
+    return header + summary_block + src_line
 
 
 # ---------- convenience small-format helpers used by RSS as fallback ----------

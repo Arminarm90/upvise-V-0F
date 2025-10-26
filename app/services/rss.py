@@ -39,6 +39,7 @@ from ..utils.i18n import t as _t
 # sites 
 from provider import google_trends, remoteok, Divar
 from provider.vipgold import process_gold, process_news, collect_gold, process_gold_and_news
+from provider import Digikala
 
 import yaml
 from pathlib import Path
@@ -78,6 +79,7 @@ LOG = logging.getLogger("rss")
 PROVIDERS = [
     (lambda u: "xminit.com/vip/goldir" in (u or "").lower(), process_gold_and_news),
     (lambda url: "divar.ir/s/" in url, Divar.process_divar),
+    (lambda url: "digikala.com/incredible-offers" in url, Digikala.process_digikala),
 ]
 
 # Admin sites 

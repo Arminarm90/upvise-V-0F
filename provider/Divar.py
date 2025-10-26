@@ -587,11 +587,15 @@ import re
 from persiantools.jdatetime import JalaliDate
 
 def _escape_md(text: str) -> str:
-    """Escape امن برای Markdown (سازگار با Telegram)"""
-    import re
+    """Escape امن برای MarkdownV2 (کامل برای فارسی و تلگرام)"""
     if not text:
         return ""
-    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", text)
+    text = str(text)
+    # حذف فاصله‌های غیرضروری در ابتدا
+    text = text.strip()
+    # escape همه‌ی کاراکترهای خاص MarkdownV2
+    return re.sub(r'([_*\[\]()~`>#+\-=|{}.!])', r'\\\1', text)
+
 
 
 def _num_emoji(i: int) -> str:
@@ -694,7 +698,7 @@ async def process_divar(store, cid_int, url: str, chat_lang) -> str:
     fa_category_tag = "#" + fa_category.replace(" ", "_")
 
     # پیام بالای خروجی
-    header = f"📢 {count_fa} آگهی جدید در دسته‌بندی {fa_category_tag}\n\n"
+    header = f"{count_fa} آگهی جدید در دسته‌بندی {fa_category_tag}\n\n"
 
     lines = []
     for i, ad in enumerate(latest_new, start=1):
@@ -708,9 +712,9 @@ async def process_divar(store, cid_int, url: str, chat_lang) -> str:
 
         part = (
             f"{num_emoji} *{title}*\n"
-            f"_دیوار | {today_jalali}_\n\n"
-            f"  قیمت: {price}\n"
-            f"  مکان: {loc}"
+            f"_{_escape_md('دیوار')} \\| {today_jalali}_\n\n"
+            f" قیمت: {price}\n"
+            f" مکان: {loc}"
         )
         if mileage:
             part += f"\n  کارکرد: {mileage}"
