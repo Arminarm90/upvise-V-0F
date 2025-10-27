@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters, MessageHandler
 
 from .config import settings
 from .storage.state import StateStore, SQLiteStateStore
@@ -22,6 +22,9 @@ from .utils.i18n import load_locales, t
 from telegram.ext import CommandHandler
 from app.handlers.payment import cmd_buy
 from app.handlers.payment import get_payment_handlers
+
+# support
+from app.support.support import support_cmd, on_lang_button, on_msg
 
 LOG = logging.getLogger(__name__)
 
@@ -140,6 +143,11 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("buy", get_payment_handlers()[0][1]))
     app.add_handler(get_payment_handlers()[1])
 
+    # support
+    app.add_handler(CommandHandler("support", support_cmd))
+    app.add_handler(CallbackQueryHandler(on_lang_button, pattern=r"^lang_(fa|en)$"))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_msg))
+    
     # ---- Error handler سراسری
     app.add_error_handler(on_error)
 
