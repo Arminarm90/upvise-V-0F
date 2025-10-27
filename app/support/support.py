@@ -76,7 +76,7 @@ GENERATION_CONFIG = {
 }
 
 # ---------- Paths ----------
-PROMPT_PATH = "Prompt.md"
+PROMPT_PATH = "app/support/Prompt.md"
 FAQ_PATH = "FAQ.json"
 
 # ---------- FAQ Store (internal-only, never exposed to user) ----------
