@@ -39,6 +39,9 @@ from telegram.ext import (
     filters,
 )
 
+from app.storage.state import SQLiteStateStore  # مسیر دقیق ماژول دیتابیس شما
+store = SQLiteStateStore()
+
 # ---------- Logging ----------
 logging.basicConfig(
     level=logging.INFO,
@@ -263,8 +266,14 @@ def language_keyboard() -> InlineKeyboardMarkup:
 # ---------- Handlers ----------
 async def support_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    LANG_PREF[chat_id] = "en"  # default English
-    await update.message.reply_text(WELCOME_EN, reply_markup=language_keyboard())
+    lang = store.get_lang(chat_id)
+    LANG_PREF[chat_id] = lang
+
+    if lang == "fa":
+        await update.message.reply_text(WELCOME_FA)
+    else:
+        await update.message.reply_text(WELCOME_EN)
+
 
 async def on_lang_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -273,18 +282,17 @@ async def on_lang_button(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     chat_id = query.message.chat_id
     data = query.data
+
     if data == "lang_fa":
         LANG_PREF[chat_id] = "fa"
-        try:
-            await query.edit_message_text(WELCOME_FA, reply_markup=language_keyboard())
-        except Exception:
-            await ctx.bot.send_message(chat_id=chat_id, text=WELCOME_FA, reply_markup=language_keyboard())
+        store.set_chat(chat_id, {"lang": "fa"})
+        await ctx.bot.send_message(chat_id, WELCOME_FA, reply_markup=language_keyboard())
+
     elif data == "lang_en":
         LANG_PREF[chat_id] = "en"
-        try:
-            await query.edit_message_text(WELCOME_EN, reply_markup=language_keyboard())
-        except Exception:
-            await ctx.bot.send_message(chat_id=chat_id, text=WELCOME_EN, reply_markup=language_keyboard())
+        store.set_chat(chat_id, {"lang": "en"})
+        await ctx.bot.send_message(chat_id, WELCOME_EN, reply_markup=language_keyboard())
+
 
 HISTORY: Dict[int, List[Tuple[str, str]]] = {}
 
@@ -293,7 +301,7 @@ async def on_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     chat_id = update.effective_chat.id
     text = update.effective_message.text.strip()
-    lang = LANG_PREF.get(chat_id, "en")
+    lang = store.get_lang(chat_id)
 
     # Start typing indicator while we work
     stop_event = asyncio.Event()
