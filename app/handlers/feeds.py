@@ -128,6 +128,22 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else: 
             await update.effective_message.reply_text(t("add.already_added", lang))
         return ConversationHandler.END
+    
+    if "https://www.khanoumi.com/tags/takhfif50" in site.lower():
+        if store.add_feed(chat_id, site):
+            store.mark_action(chat_id)
+            await update.effective_message.reply_text(t("add.added_feed", lang))
+        else: 
+            await update.effective_message.reply_text(t("add.already_added", lang))
+        return ConversationHandler.END
+
+    if "takhfifan.com" in site.lower():
+        if store.add_feed(chat_id, site):
+            store.mark_action(chat_id)
+            await update.effective_message.reply_text(t("add.added_feed", lang))
+        else: 
+            await update.effective_message.reply_text(t("add.already_added", lang))
+        return ConversationHandler.END
 
     try:
         if await rss.is_valid_feed(site):

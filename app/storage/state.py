@@ -561,16 +561,15 @@ class SQLiteStateStore:
     def set_seen(self, chat_id: int | str, url: str, seen_set: Iterable[str]) -> None:
         """
         ذخیره‌ی آیتم‌های seen برای هر فید.
-        برای فیدهای ادمین (دارای prefix 'seen_admin::') فقط در جدول seen ذخیره می‌کند،
-        و هرگز وارد جدول feeds نمی‌کند تا در لیست کاربر نمایش داده نشود.
+        فیدهایی که با پیشوند خاص ('seen_admin::' یا 'takhfifan_seen::') شروع می‌شن،
+        فقط در جدول seen ذخیره می‌شن و در جدول feeds نمی‌رن.
         """
         cid = str(chat_id)
         u = str(url)
 
-        # اگر فید از نوع ادمین است (دارای prefix خاص)
-        is_admin_feed = u.startswith("seen_admin::")
+        # اگر فید از نوع خاص (ادمین یا اختصاصی) است
+        is_special_feed = u.startswith("seen_admin::") or u.startswith("takhfifan_seen::")
 
-        # اگر admin-feed نیست، حتماً در feeds هم وجود داشته باشد
         with self._locked_cursor() as cur:
             # اطمینان از وجود کاربر
             cur.execute(
@@ -578,14 +577,14 @@ class SQLiteStateStore:
                 (cid, "en"),
             )
 
-            if not is_admin_feed:
-                # فقط برای فیدهای معمولی در جدول feeds ذخیره کن
+            # فقط اگر فید معمولی باشد، در جدول feeds هم ذخیره کن
+            if not is_special_feed:
                 cur.execute(
                     "INSERT OR IGNORE INTO feeds(chat_id, url) VALUES(?, ?)",
                     (cid, u),
                 )
 
-            # در هر دو حالت (admin یا معمولی)، seen را به‌روز کن
+            # حالا seenها را به‌روز کن
             cur.execute(
                 "DELETE FROM seen WHERE chat_id = ? AND feed_url = ?",
                 (cid, u),
@@ -595,7 +594,6 @@ class SQLiteStateStore:
                     "INSERT OR IGNORE INTO seen(chat_id, feed_url, item_id) VALUES(?, ?, ?)",
                     (cid, u, str(it)),
                 )
-
 
     # --------------- username helpers ---------------
     def set_username(self, chat_id: int | str, username: Optional[str]) -> None:
