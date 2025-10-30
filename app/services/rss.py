@@ -40,7 +40,7 @@ from ..utils.i18n import t as _t
 from provider import google_trends, remoteok, Divar
 from provider.vipgold import process_gold, process_news, collect_gold, process_gold_and_news
 from provider import Digikala
-from provider import Khanomi
+# from provider import Khanomi
 from provider import Takhfifan
 
 import yaml
@@ -82,7 +82,7 @@ PROVIDERS = [
     (lambda u: "xminit.com/vip/goldir" in (u or "").lower(), process_gold_and_news),
     (lambda url: "divar.ir/s/" in url, Divar.process_divar),
     (lambda url: "digikala.com/incredible-offers" in url, Digikala.process_digikala),
-    (lambda url: "https://www.khanoumi.com/tags/takhfif50" in url, Khanomi.get_khanoumi_discounts),
+    # (lambda url: "https://www.khanoumi.com/tags/takhfif50" in url, Khanomi.get_khanoumi_discounts),
     (lambda url: "takhfifan.com" in url, Takhfifan.get_takhfifan_offers),
 ]
 
