@@ -42,6 +42,7 @@ from provider.vipgold import process_gold, process_news, collect_gold, process_g
 from provider import Digikala
 # from provider import Khanomi
 from provider import Takhfifan
+from provider import ThersanAI
 
 import yaml
 from pathlib import Path
@@ -84,6 +85,7 @@ PROVIDERS = [
     (lambda url: "digikala.com/incredible-offers" in url, Digikala.process_digikala),
     # (lambda url: "https://www.khanoumi.com/tags/takhfif50" in url, Khanomi.get_khanoumi_discounts),
     (lambda url: "takhfifan.com" in url, Takhfifan.get_takhfifan_offers),
+    # (lambda url: "theresanaiforthat.com" in url, ThersanAI.get_theresanaiforthat_offers),
 ]
 
 # Admin sites 

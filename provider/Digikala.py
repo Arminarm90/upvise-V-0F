@@ -34,10 +34,22 @@ async def fetch_from_api(category_id: str):
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
             r = await client.get(url)
             if r.status_code == 200 and "data" in r.json():
-                return r.json()["data"]["products"]
+                products = r.json()["data"]["products"]
+
+                # ✅ اصلاح قیمت‌ها (تبدیل ریال به تومان)
+                for p in products:
+                    variant = p.get("default_variant") or p.get("variant", {})
+                    price_info = variant.get("price", {})
+                    if "selling_price" in price_info:
+                        price_info["selling_price"] = int(price_info["selling_price"] / 10)
+                    if "rrp_price" in price_info:
+                        price_info["rrp_price"] = int(price_info["rrp_price"] / 10)
+
+                return products
     except Exception as e:
         logger.warning(f"API fetch failed: {e}")
     return None
+
 
 # === در صورت شکست API از Playwright استفاده کن ===
 async def fetch_from_playwright(category_id: str):
