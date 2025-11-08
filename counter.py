@@ -3,21 +3,25 @@ import time
 from datetime import datetime, timedelta
 import threading
 import requests
+import json
 
 # ---------------- تنظیمات ----------------
 DB_PATH = "state.db"
 
-# نام جداول
 USERS_TABLE = "chats"
 SEEN_TABLE = "seen"
+KEYWORDS_TABLE = "user_keywords"
 
 # 🔐 اطلاعات بات تلگرام
-BOT_TOKEN = "1759611476:AAHOYSJyTxXu6tJDPa1-F06QjOYFj8BsLqg"  # ← جایگزین کن
-CHAT_ID = "1324005362"       # ← جایگزین کن
+# BOT_TOKEN = "1759611476:AAHOYSJyTxXu6tJDPa1-F06QjOYFj8BsLqg"
+# CHAT_ID = "1324005362"
 
+BOT_TOKEN = "8092658674:AAHt2XZNOoVQOEcizA-YFGyZ9UyTgYVzdcE"
+CHAT_ID = "394617203"
 # ⏱ تنظیم بازه‌ها
 USER_CHECK_INTERVAL = 10             # هر چند ثانیه چک کنه (افزایش کاربر)
 SEEN_CHECK_INTERVAL_HOURS = 24       # هر چند ساعت گزارش بده (فیدها)
+KEYWORD_CHECK_INTERVAL = 15          # هر چند ثانیه کلیدواژه‌ها چک بشن
 # ------------------------------------------
 
 
@@ -33,7 +37,6 @@ def send_telegram_message(text: str):
 
 # ================= مانیتور کاربران جدید =================
 def get_user_count():
-    """تعداد کاربران در جدول chats"""
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
@@ -75,8 +78,6 @@ def monitor_users():
 def get_seen_count_since(hours_ago: int):
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
-
-    # بررسی وجود ستون created_at
     cur.execute(f"PRAGMA table_info({SEEN_TABLE});")
     cols = [c[1] for c in cur.fetchall()]
     has_time_col = "created_at" in cols
@@ -111,14 +112,63 @@ def monitor_seen_table():
         time.sleep(SEEN_CHECK_INTERVAL_HOURS * 3600)
 
 
-# ================= اجرای همزمان دو مانیتور =================
+# ================= مانیتور کلیدواژه‌های جدید =================
+def get_all_keywords():
+    """تمام کلیدواژه‌های فعلی جدول را برمی‌گرداند"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(f"SELECT chat_id, keyword FROM {KEYWORDS_TABLE}")
+    rows = cur.fetchall()
+    conn.close()
+    return rows
+
+
+def monitor_keywords():
+    print("🗝 مانیتور کلیدواژه‌ها فعال شد...")
+    send_telegram_message("🗝 مانیتورینگ کلیدواژه‌ها شروع شد ✅")
+
+    seen_keywords = set(get_all_keywords())  # مجموعه‌ای از (chat_id, keyword)
+
+    if seen_keywords:
+        total = len(seen_keywords)
+        send_telegram_message(f"🔍 مانیتورینگ آغاز شد")
+
+        # استخراج فقط کلیدواژه‌ها بدون تکرار
+        unique_keywords = sorted({kw for _, kw in seen_keywords})
+
+        # تقسیم پیام‌ها اگر طولش زیاد شد (برای محدودیت تلگرام)
+        chunk_size = 40  # حداکثر تعداد کلمه در هر پیام
+        for i in range(0, len(unique_keywords), chunk_size):
+            chunk = unique_keywords[i:i+chunk_size]
+            msg = "🗝 کلیدواژه‌های فعلی:\n" + "\n".join(chunk)
+            send_telegram_message(msg)
+
+    while True:
+        time.sleep(KEYWORD_CHECK_INTERVAL)
+        current_keywords = set(get_all_keywords())
+
+        new_keywords = current_keywords - seen_keywords
+        if new_keywords:
+            for chat_id, keyword in new_keywords:
+                message = (
+                    f"🆕 کلیدواژه جدید اضافه شد!\n"
+                    f"👤 Chat ID: {chat_id}\n"
+                    f"🔑 Keyword: {keyword}"
+                )
+                send_telegram_message(message)
+                print(message)
+
+            seen_keywords = current_keywords
+
+
+
+# ================= اجرای همه‌ی مانیتورها =================
 if __name__ == "__main__":
     send_telegram_message("🚀 مانیتورینگ کلی شروع شد ✅")
 
-    # اجرای دو ترد همزمان (کاربران + فیدها)
     threading.Thread(target=monitor_users, daemon=True).start()
     threading.Thread(target=monitor_seen_table, daemon=True).start()
+    threading.Thread(target=monitor_keywords, daemon=True).start()
 
-    # نگه داشتن برنامه
     while True:
         time.sleep(60)
