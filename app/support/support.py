@@ -74,9 +74,10 @@ GENERATION_CONFIG = {
     "temperature": 0.3,
     "top_p": 0.8,
     "top_k": 32,
-    "max_output_tokens": 1024,
-    "response_mime_type": "application/json",
+    "max_output_tokens": 4096,
+    "response_mime_type": "application/json",  # 👈 تغییر از application/json
 }
+
 
 # ---------- Paths ----------
 PROMPT_PATH = "app/support/Prompt.md"
@@ -248,6 +249,21 @@ def call_gemini(prompt: str, ctx_block: str, hist: List[Tuple[str, str]], user_t
         {"role": "user", "parts": f"USER:\n{user_text}"},
     ]
     resp = model.generate_content(payload)  # blocking
+
+    # 🚨 افزودن مدیریت خطا: بررسی بلاک شدن پاسخ
+    if not resp.candidates:
+        # هیچ کاندیدی وجود ندارد (معمولاً به معنای بلاک شدن کل پرامپت است)
+        log.warning(f"Response blocked. Finish reason: {getattr(resp.prompt_feedback, 'block_reason', 'N/A')}")
+        return {"alert_flag": True, "alert_reason": "Prompt blocked by safety filters.", "confidence": 0.0, "answer": "", "follow_up_question": ""}
+
+    candidate = resp.candidates[0]
+    if candidate.finish_reason.value != 1: # 1 is 'STOP' (success)
+        # Finish reason != STOP (مثلاً 2: MAX_TOKENS یا 3: SAFETY)
+        log.warning(f"Candidate response finished with reason: {candidate.finish_reason.name}")
+        if candidate.finish_reason.value == 3: # 3 is 'SAFETY'
+            return {"alert_flag": True, "alert_reason": "Candidate blocked by safety filters.", "confidence": 0.0, "answer": "", "follow_up_question": ""}
+    # ... ادامه کد:    
+    
     return parse_json(getattr(resp, "text", "") or "{}")
 
 # ---------- Language & UI ----------
@@ -341,10 +357,28 @@ async def on_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # Compose user-facing reply (no sources, no file mentions)
         if ans:
             reply = ans
+            reply = (
+                reply.replace("*", "")  # remove markdown bold
+                    .replace("**", "")
+                    .replace("`", "")
+                    .replace("_", "")
+                    .replace("•", "▪️")  # unify bullets
+                    .replace("*", "")
+                    .replace(" - ", " • ")  # standard bullet
+                    .replace("\n\n\n", "\n\n")  # collapse triple newlines
+                    .strip()
+            )
+
+            # Ensure extra spacing between sections
+            reply = reply.replace(":\n", ":\n\n")
+
+            # If model uses markdown lists like "1.", fix them visually
+            import re
+            reply = re.sub(r"^\s*[\*\-\d]+\.\s*", "• ", reply, flags=re.M)
         else:
             reply = "I don’t have that information right now." if lang == "en" else "الان این اطلاعات رو ندارم."
-        if follow:
-            reply += f"\n\n┄\n{follow}"
+        # if follow:
+        #     reply += f"\n\n┄\n{follow}"
 
         await update.message.reply_text(reply)
         hist.append(("user", text))

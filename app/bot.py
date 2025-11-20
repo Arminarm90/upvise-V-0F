@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
-from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters, MessageHandler
+from telegram import BotCommand, Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, filters, MessageHandler, ChatMemberHandler
 
 from .config import settings
 from .storage.state import StateStore, SQLiteStateStore
@@ -16,7 +16,7 @@ from .handlers import basic, feeds  # /discover حذف شده است
 from .handlers.feeds import get_add_conversation_handler, get_remove_conversation_handler, cb_list_actions, list_feeds  # ConversationHandler برای /add
 from .handlers.lang import cmd_lang, cb_lang
 from .handlers.list import cmd_list, cb_list_nav
-from .utils.i18n import load_locales, t
+from .utils.i18n import load_locales, t, get_chat_lang
 
 # sub
 from telegram.ext import CommandHandler
@@ -73,6 +73,56 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception:
         upd_repr = repr(update)
     LOG.exception("Unhandled error | update=%s", upd_repr, exc_info=err)
+
+# Group and Channel add
+# async def handle_bot_added(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+#     chat = update.my_chat_member.chat
+#     new_status = update.my_chat_member.new_chat_member.status
+#     old_status = update.my_chat_member.old_chat_member.status
+#     user_data = context.user_data
+#     store = context.bot_data["store"]
+#     lang = get_chat_lang(store, update.effective_user.id)
+
+#     # ✅ اگر ربات به گروه اضافه شده
+#     if new_status in ("administrator", "member"):
+#         if user_data.get("awaiting_group_join"):
+#             payload = user_data.get("pending_payload")
+#             kind = user_data.get("pending_kind", "feed")
+
+#             if payload:
+#                 if kind == "keyword":
+#                     store.add_keyword(chat.id, payload)
+#                 else:
+#                     store.add_feed(chat.id, payload)
+
+#                 # ثبت مالک (کاربری که اضافه کرده)
+#                 store.set_owner(chat.id, update.effective_user.id)
+
+#                 # ✅ ثبت نام گروه/کانال
+#                 if hasattr(chat, "title") and chat.title:
+#                     store.set_chat_name(chat.id, chat.title)
+
+#                 msg = t("bot.feed_enabled", lang).replace("{chat_type}", chat.type)
+
+#                 await context.bot.send_message(chat.id, msg)
+                
+#                 user_data.clear()
+
+#     # ❌ اگر ربات از گروه حذف شده یا اخراج شده
+#     elif new_status in ("kicked", "left"):
+#         context.user_data.clear()
+#         try:
+#             store.clear_feeds(chat.id)
+#             if hasattr(store, "delete_chat"):
+#                 store.delete_chat(chat.id)
+#             else:
+#                 with store._locked_cursor() as cur:
+#                     cur.execute("DELETE FROM chats WHERE chat_id = ?", (chat.id,))
+#                     store.conn.commit()
+
+#             LOG.warning(f"Bot was removed from chat {chat.id}. All data cleared.")
+#         except Exception as e:
+#             LOG.error(f"Failed to cleanup chat {chat.id}: {e}")
 
 
 def build_app() -> Application:
@@ -147,6 +197,10 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("support", support_cmd))
     app.add_handler(CallbackQueryHandler(on_lang_button, pattern=r"^lang_(fa|en)$"))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), on_msg))
+    
+    # Group and Channel add
+    # app.add_handler(ChatMemberHandler(handle_bot_added, ChatMemberHandler.MY_CHAT_MEMBER))
+
     
     # ---- Error handler سراسری
     app.add_error_handler(on_error)

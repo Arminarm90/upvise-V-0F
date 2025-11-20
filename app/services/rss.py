@@ -35,6 +35,7 @@ from ..utils.i18n import get_chat_lang
 from ..utils.message_formatter import format_entry, format_article, _fmt_date
 from ..utils.text import html_escape as esc, html_attr_escape as esc_attr
 from ..utils.i18n import t as _t
+from .AIFeeds import AIFeedsService
 
 # sites 
 from provider import google_trends, remoteok, Divar
@@ -89,12 +90,33 @@ PROVIDERS = [
 ]
 
 # Admin sites 
-ADMIN_SITES_FILE = Path(__file__).resolve().parent.parent / "admin_sites/admin_sites.yaml"
+ADMIN_SITES_DIR = Path(__file__).resolve().parent.parent / "admin_sites"
+ADMIN_SITES_FILE = ADMIN_SITES_DIR / "admin_sites.yaml"
+AI_FEEDS_FILE = ADMIN_SITES_DIR / "ai_feeds.yaml"
+
 try:
     with open(ADMIN_SITES_FILE, "r", encoding="utf-8") as f:
         ADMIN_FEEDS = yaml.safe_load(f).get("admin_feeds", [])
 except Exception:
     ADMIN_FEEDS = []
+    
+AI_FEEDS = []
+try:
+    with open(AI_FEEDS_FILE, "r", encoding="utf-8") as f:
+        AI_FEEDS = yaml.safe_load(f).get("ai_feeds", [])
+except FileNotFoundError:
+    # اگر فایل وجود نداشت، آن را با محتوای خالی ایجاد کنید
+    try:
+        with open(AI_FEEDS_FILE, "w", encoding="utf-8") as f:
+            yaml.dump({"ai_feeds": []}, f, allow_unicode=True)
+        AI_FEEDS = []
+    except Exception:
+        LOG.error("Failed to create AI feeds file.")
+except Exception:
+    AI_FEEDS = []
+
+# ادغام فیدهای ادمین و AI برای اسکن سراسری توسط Keyword
+GLOBAL_FEEDS = ADMIN_FEEDS + AI_FEEDS    
     
 class RSSService:
     """
@@ -116,6 +138,12 @@ class RSSService:
         self._keyword_seen_global = {}     # key=chat_id → set(eid)
         self._admin_seen_cache: dict[tuple[int,str], set] = {}  # key = (chat_id, feed_url)
 
+        self.AIFeads = AIFeedsService()
+        self.AI_FEEDS_FILE = AI_FEEDS_FILE # ذخیره مسیر برای استفاده‌های بعدی
+        self.GLOBAL_FEEDS = GLOBAL_FEEDS
+        from ..utils.text import canonicalize_url, ensure_scheme
+        self._canon = lambda url: canonicalize_url(ensure_scheme(url)) # برای تضمین تمیزی لینک‌ها
+    
     # ------------------------------------------------------------------ #
     # Feeds
     # ------------------------------------------------------------------ #
@@ -145,6 +173,87 @@ class RSSService:
         if f:
             return getattr(getattr(f, "feed", object()), "title", "") or u
         return u
+
+    # AI Finds Feeds
+    async def _ai_find_rss_links(self, keyword: str) -> List[str]:
+        """
+        تلاش می‌کند با استفاده از هوش مصنوعی (LLM) فیدهای RSS مرتبط با کلمه کلیدی را پیدا کند.
+        """
+        
+        # پرامپت برای LLM 
+        prompt = (
+            f"Find 4 reliable and active RSS feed links related to the keyword: '{keyword}'. "
+            f"The links must be actual RSS/Atom URLs, not general website links. "
+            f"Return only the raw list of URLs."
+        )
+            
+        # --- استفاده مستقیم از Summarizer/LLM ---
+        try:
+            # 3. فراخوانی متد generate_list از سرویس هوش مصنوعی
+            generated_list = await self.AIFeads.generate_list(keyword, max_results=4)
+            
+            print("hereeeeeee ====", generated_list)
+            
+            # فیلتر کردن برای اطمینان از URL بودن
+            valid_urls = [u for u in generated_list if u.startswith(('http://', 'https://'))]
+            
+            LOG.info("Found %d feeds for keyword '%s' using AI prompt.", len(valid_urls), keyword)
+            return valid_urls
+                 
+        except Exception as e:
+            LOG.warning("AI failed to generate feeds for keyword: %s", e)
+            return []
+
+    def _load_ai_feeds(self) -> List[str]:
+        """فیدهای AI موجود را از فایل بارگذاری می‌کند."""
+        try:
+            with open(self.AI_FEEDS_FILE, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f).get("ai_feeds", [])
+        except Exception:
+            return []
+
+    def _save_ai_feeds(self, feeds: List[str]):
+        """لیست فیدهای AI را به همراه حذف تکراری‌ها در فایل ذخیره می‌کند."""
+        try:
+            # حذف تکراری‌ها و مرتب‌سازی
+            unique_feeds = sorted(list(set(feeds)))
+            with open(self.AI_FEEDS_FILE, "w", encoding="utf-8") as f:
+                yaml.dump({"ai_feeds": unique_feeds}, f, allow_unicode=True)
+            # به‌روزرسانی لیست سراسری در runtime
+            self.GLOBAL_FEEDS = ADMIN_FEEDS + unique_feeds
+        except Exception as e:
+            LOG.error("Failed to save AI feeds to file: %s", e)
+
+    async def find_and_add_ai_feeds(self, keyword: str) -> int:
+        """
+        لینک‌های RSS را برای کلمه کلیدی پیدا کرده و به AI_FEEDS_FILE اضافه می‌کند (بدون لینک‌های تکراری).
+        """
+        # 1. پیدا کردن لینک‌های جدید
+        new_urls = await self._ai_find_rss_links(keyword)
+        if not new_urls:
+            return 0
+        
+        # 2. بارگذاری لینک‌های موجود
+        current_feeds = self._load_ai_feeds()
+        added_count = 0
+        
+        # 3. ایجاد مجموعه (Set) از تمام فیدهای موجود (AI و Admin) برای بررسی تکراری
+        # (ADMIN_FEEDS باید از rss.py در دسترس باشد)
+        all_existing_feeds = set(current_feeds) | set(self.GLOBAL_FEEDS)
+        
+        # 4. اضافه کردن لینک‌های جدید غیرتکراری
+        for url in new_urls:
+            canon_url = self._canon(url) 
+            if canon_url and canon_url not in all_existing_feeds:
+                current_feeds.append(canon_url)
+                all_existing_feeds.add(canon_url) # اضافه کردن به مجموعه تکراری‌ها
+                added_count += 1
+                
+        # 5. ذخیره در صورت وجود مورد جدید
+        if added_count > 0:
+            self._save_ai_feeds(current_feeds)
+            
+        return added_count
 
     # ------------------------------------------------------------------ #
     # HTML helpers (shared)
@@ -627,6 +736,9 @@ class RSSService:
             LOG.info("⏩ skipping %s for chat=%s because feed was removed", url, cid_int)
             return
 
+        if url in AI_FEEDS and url not in ADMIN_FEEDS:
+            LOG.info("Skipping direct processing for AI feed: %s", url)
+            return
 
         try:
             
@@ -903,6 +1015,8 @@ class RSSService:
             keywords = [k["keyword"].lower() for k in self.store.list_keywords(cid_int)]
             admin_candidates: list[str] = ADMIN_FEEDS.copy() if (keywords and ADMIN_FEEDS) else []
 
+            global_candidates: list[str] = self.GLOBAL_FEEDS.copy() if keywords and self.GLOBAL_FEEDS else []
+
             # اگر نه فید کاربر داریم و نه کی‌ورد، رد شو
             if not user_feeds and not keywords:
                 continue
@@ -965,9 +1079,9 @@ class RSSService:
             # --- اگر کی‌ورد هست، اسکن ادمین‌ها برای کی‌وردها (فقط جمع‌آوری matches، نه ارسال per-entry) ---
             admin_scan_tasks = []
             if keywords and admin_candidates:
-                admin_fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in admin_candidates]
-                admin_results = await asyncio.gather(*admin_fetch_tasks, return_exceptions=True)
-                for url, res in zip(admin_candidates, admin_results):
+                global_fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in global_candidates]
+                global_results = await asyncio.gather(*global_fetch_tasks, return_exceptions=True)
+                for url, res in zip(global_candidates, global_results):
                     if isinstance(res, Exception) or not res:
                         LOG.debug("No admin feed parsed for %s (chat=%s): %s", url, cid_int, res)
                         continue
@@ -1063,6 +1177,20 @@ class RSSService:
                         # بعد از ارسال، همه‌ی آیتم‌های chunk رو در seen ثبت کن تا دورِ بعدی تکراری نیاد
                         # بعد از ارسال، فقط برای فیدهایی که کاربر واقعاً آنها را دارد در DB ثبت کن.
                         # (تا admin feeds به لیست لینک‌های کاربر اضافه نشوند)
+                        
+                        for _, e, _, url in chunk:
+                            eid = self.entry_id(e)
+                            try:
+                                self.store.log_keyword_event(
+                                    chat_id=cid_int,
+                                    keyword=kw,
+                                    feed_url=url,
+                                    item_id=eid,
+                                    ts=datetime.utcnow().isoformat()
+                                )
+                            except Exception as ex:
+                                LOG.error("Failed to log keyword event: %s", ex)                        
+                        
                         for _, e, _, url in chunk:
                             eid = self.entry_id(e)
                             try:

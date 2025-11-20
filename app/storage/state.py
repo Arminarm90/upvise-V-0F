@@ -303,6 +303,17 @@ class SQLiteStateStore:
             """
             )
             self.conn.commit()
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS keyword_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    chat_id TEXT NOT NULL,
+                    keyword TEXT NOT NULL,
+                    feed_url TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+                )
+            """)
 
             cur.execute("PRAGMA table_info(chats);")
             cols = [r["name"] for r in cur.fetchall()]
@@ -321,6 +332,13 @@ class SQLiteStateStore:
                     cur.execute("ALTER TABLE chats ADD COLUMN feeds_history TEXT DEFAULT '[]';")
                 except Exception:
                     pass
+                
+            if "owner_id" not in cols:
+                try:
+                    cur.execute("ALTER TABLE chats ADD COLUMN owner_id TEXT;")
+                except Exception:
+                    pass
+
 
             self.conn.commit()
 
@@ -595,6 +613,45 @@ class SQLiteStateStore:
                     (cid, u, str(it)),
                 )
 
+    # For groups and channels, set the owner user ID
+    def set_owner(self, chat_id: int | str, owner_id: int | str) -> None:
+        """ثبت مالک گروه یا کانال (کاربر ایجادکننده فید)."""
+        cid = str(chat_id)
+        oid = str(owner_id)
+        with self._locked_cursor() as cur:
+            # اطمینان از اینکه چت وجود داره
+            cur.execute(
+                "INSERT OR IGNORE INTO chats(chat_id, lang, feeds_history, first_seen, last_action) VALUES(?, ?, COALESCE(?, '[]'), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+                (cid, "en", json.dumps([])),
+            )
+            # تنظیم owner
+            cur.execute("UPDATE chats SET owner_id = ? WHERE chat_id = ?", (oid, cid))
+
+    def get_owner(self, chat_id: int | str) -> Optional[str]:
+        cid = str(chat_id)
+        with self._locked_cursor() as cur:
+            cur.execute("SELECT owner_id FROM chats WHERE chat_id = ?", (cid,))
+            r = cur.fetchone()
+            return r["owner_id"] if r else None
+
+    def delete_chat(self, chat_id: int):
+        with self._locked_cursor() as cur:
+            cur.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+            cur.execute("DELETE FROM feeds WHERE chat_id = ?", (chat_id,))
+            cur.execute("DELETE FROM user_keywords WHERE chat_id = ?", (chat_id,))
+            cur.execute("DELETE FROM seen WHERE chat_id = ?", (chat_id,))
+            self.conn.commit()
+            
+    def set_chat_name(self, chat_id: int, name: str):
+        """ثبت یا به‌روزرسانی نام چت (گروه/کانال)."""
+        with self._locked_cursor() as cur:
+            cur.execute("""
+                INSERT INTO chats (chat_id, name)
+                VALUES (?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET name = excluded.name
+            """, (chat_id, name))
+            self.conn.commit()
+
     # --------------- username helpers ---------------
     def set_username(self, chat_id: int | str, username: Optional[str]) -> None:
         cid = str(chat_id)
@@ -784,3 +841,12 @@ class SQLiteStateStore:
             kid = rows[index - 1]["id"]
             cur.execute("DELETE FROM user_keywords WHERE id=?", (kid,))
             return True
+
+    # log keywords feeds
+    def log_keyword_event(self, chat_id: str, keyword: str, feed_url: str, item_id: str, ts: str):
+        """ثبت ارسال یک پیام keyword-match"""
+        with self._locked_cursor() as cur:
+            cur.execute("""
+                INSERT INTO keyword_events (chat_id, keyword, feed_url, item_id, created_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, (str(chat_id), keyword.lower(), feed_url, item_id, ts))
