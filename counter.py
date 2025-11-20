@@ -13,11 +13,11 @@ SEEN_TABLE = "seen"
 KEYWORDS_TABLE = "user_keywords"
 
 # 🔐 اطلاعات بات تلگرام
-# BOT_TOKEN = "8092658674:AAHt2XZNOoVQOEcizA-YFGyZ9UyTgYVzdcE"
-# CHAT_ID = "394617203"
+BOT_TOKEN = "8092658674:AAHt2XZNOoVQOEcizA-YFGyZ9UyTgYVzdcE"
+CHAT_ID = "394617203"
 
-BOT_TOKEN = "6015328845:AAEr5M2VWVqGugUOGaTVwJ747xIomscR2s0"
-CHAT_ID = "1324005362"
+# BOT_TOKEN = "6015328845:AAEr5M2VWVqGugUOGaTVwJ747xIomscR2s0"
+# CHAT_ID = "1324005362"
 
 # ⏱ تنظیم بازه‌ها
 USER_CHECK_INTERVAL = 10             # هر چند ثانیه چک کنه (افزایش کاربر)
