@@ -154,6 +154,14 @@ async def receive_site_url(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not _is_probably_url(raw):
         store.add_keyword(chat_id, raw)
         store.mark_action(chat_id)
+        
+        # 🚀 اجرای خودکار هوش مصنوعی برای پیدا کردن RSS ها
+        try:
+            added_count = await rss.find_and_add_ai_feeds(raw)
+            LOG.info("AI added %d feeds for keyword '%s'", added_count, raw)
+        except Exception as e:
+            LOG.error("AI feed discovery failed for keyword '%s': %s", raw, e)
+
         msg = t("add.keyword_added", lang)
         if msg == "add.keyword_added":
             msg = "✅ Keyword added!" if lang == "en" else "✅ کلمه کلیدی اضافه شد!"
