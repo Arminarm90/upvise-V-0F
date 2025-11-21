@@ -104,13 +104,42 @@ def monitor_seen_table():
     while True:
         count = get_seen_count_since(SEEN_CHECK_INTERVAL_HOURS)
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # --- محاسبه درصد کلیدواژه‌های فعال ---
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+
+        # تعداد کل کلیدواژه‌ها
+        cur.execute("SELECT COUNT(*) FROM user_keywords")
+        total_keywords = cur.fetchone()[0]
+
+        # تعداد کلیدواژه‌هایی که حداقل یک keyword_event داشتند
+        cur.execute("""
+            SELECT COUNT(DISTINCT keyword)
+            FROM keyword_events
+            WHERE created_at >= ?
+        """, ((datetime.utcnow() - timedelta(hours=SEEN_CHECK_INTERVAL_HOURS)).isoformat(),))
+        active_keywords = cur.fetchone()[0]
+
+        conn.close()
+
+        # محاسبه درصد
+        percent = 0
+        if total_keywords > 0:
+            percent = (active_keywords / total_keywords) * 100
+
+        # ساخت پیام
         message = (
             f"⏱ گزارش مانیتورینگ در {now_str}\n"
-            f"📨 در {SEEN_CHECK_INTERVAL_HOURS} ساعت گذشته، {count} فید ارسال شده است ✅"
+            f"📨 در {SEEN_CHECK_INTERVAL_HOURS} ساعت گذشته، {count} فید ارسال شده است ✅\n"
+            f"📊 درصد کلیدواژه‌های فعال: {percent:.2f}%"
         )
+
         print(message)
         send_telegram_message(message)
+
         time.sleep(SEEN_CHECK_INTERVAL_HOURS * 3600)
+
 
 
 # ================= مانیتور کلیدواژه‌های جدید (با نام/یوزرنیم) =================
