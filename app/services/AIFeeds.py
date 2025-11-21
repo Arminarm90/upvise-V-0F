@@ -28,12 +28,14 @@ class AIFeedsService:
         # زبان از کلیدواژه کاربر است
         if lang == "fa":
             lang_instruction = (
+                "First know what user wants and what keyword is about Then suggest RSS Links about that.\n"
                 "The RSS feeds MUST belong to Iranian / Persian sources, news agencies, "
                 "Persian tech websites, Persian blogs, or Persian media.\n"
                 "Examples of allowed domains: iribnews, isna, irna, mehrnews, tasnimnews, khabaronline, zoomit, digiato.\n"
             )
         else:
             lang_instruction = (
+                "First know what user wants and what keyword is about Then suggest RSS Links about that.\n"
                 "The RSS feeds MUST belong to English international news or tech sources.\n"
                 "Examples: Reuters, BBC, CNN, TechCrunch, Wired, Verge, APNews.\n"
             )
