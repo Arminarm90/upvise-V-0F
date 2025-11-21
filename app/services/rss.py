@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 from telegram.ext import Application
 from urllib.parse import quote
 import random
+import aiohttp
 
 from ..utils.message_formatter import (
     format_entry,
@@ -117,6 +118,14 @@ except Exception:
 
 # ادغام فیدهای ادمین و AI برای اسکن سراسری توسط Keyword
 GLOBAL_FEEDS = ADMIN_FEEDS + AI_FEEDS    
+
+# Detect lang
+def detect_lang(text: str) -> str:
+    """Detects if input is Persian or English."""
+    # Persian Unicode range
+    if re.search(r'[\u0600-\u06FF]', text):
+        return "fa"
+    return "en"
     
 class RSSService:
     """
@@ -134,6 +143,7 @@ class RSSService:
          # نگهداری ایندکس (cursor) برای هر چت در runtime
         self._fallback_cache: dict[tuple[int,str], float] = {}   # key = (chat_id, entry_id)
         self._cursor_per_chat: dict[int,int] = {}
+        self._cursor_global: dict[int,int] = {}
         self._keyword_global_matches = {}  # key=chat_id → {kw: [(eid,e,f,url)]}
         self._keyword_seen_global = {}     # key=chat_id → set(eid)
         self._admin_seen_cache: dict[tuple[int,str], set] = {}  # key = (chat_id, feed_url)
@@ -175,22 +185,40 @@ class RSSService:
         return u
 
     # AI Finds Feeds
+    async def _validate_rss(self, url: str) -> bool:
+        """Check if URL returns a valid RSS/Atom feed."""
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, timeout=6) as resp:
+                    if resp.status != 200:
+                        return False
+
+                    content = await resp.text()
+
+            # quick XML marker
+            if not any(tag in content.lower() for tag in ["<rss", "<feed", "<?xml"]):
+                return False
+
+            # deep check using feedparser
+            parsed = feedparser.parse(content)
+            if not parsed.entries:
+                return False
+
+            return True
+
+        except Exception:
+            return False  
+          
     async def _ai_find_rss_links(self, keyword: str) -> List[str]:
         """
         تلاش می‌کند با استفاده از هوش مصنوعی (LLM) فیدهای RSS مرتبط با کلمه کلیدی را پیدا کند.
         """
-        
-        # پرامپت برای LLM 
-        prompt = (
-            f"Find 4 reliable and active RSS feed links related to the keyword: '{keyword}'. "
-            f"The links must be actual RSS/Atom URLs, not general website links. "
-            f"Return only the raw list of URLs."
-        )
             
         # --- استفاده مستقیم از Summarizer/LLM ---
         try:
             # 3. فراخوانی متد generate_list از سرویس هوش مصنوعی
-            generated_list = await self.AIFeads.generate_list(keyword, max_results=4)
+            lang = detect_lang(keyword)
+            generated_list = await self.AIFeads.generate_list(keyword, lang=lang, max_results=4)
             
             print("hereeeeeee ====", generated_list)
             
@@ -225,35 +253,38 @@ class RSSService:
             LOG.error("Failed to save AI feeds to file: %s", e)
 
     async def find_and_add_ai_feeds(self, keyword: str) -> int:
-        """
-        لینک‌های RSS را برای کلمه کلیدی پیدا کرده و به AI_FEEDS_FILE اضافه می‌کند (بدون لینک‌های تکراری).
-        """
-        # 1. پیدا کردن لینک‌های جدید
         new_urls = await self._ai_find_rss_links(keyword)
         if not new_urls:
             return 0
-        
-        # 2. بارگذاری لینک‌های موجود
+
         current_feeds = self._load_ai_feeds()
         added_count = 0
-        
-        # 3. ایجاد مجموعه (Set) از تمام فیدهای موجود (AI و Admin) برای بررسی تکراری
-        # (ADMIN_FEEDS باید از rss.py در دسترس باشد)
-        all_existing_feeds = set(current_feeds) | set(self.GLOBAL_FEEDS)
-        
-        # 4. اضافه کردن لینک‌های جدید غیرتکراری
+
+        all_existing = set(current_feeds) | set(self.GLOBAL_FEEDS)
+
         for url in new_urls:
-            canon_url = self._canon(url) 
-            if canon_url and canon_url not in all_existing_feeds:
-                current_feeds.append(canon_url)
-                all_existing_feeds.add(canon_url) # اضافه کردن به مجموعه تکراری‌ها
-                added_count += 1
-                
-        # 5. ذخیره در صورت وجود مورد جدید
+            canon = self._canon(url)
+            if not canon or canon in all_existing:
+                continue
+
+            # --- NEW: validate RSS ---
+            is_valid = await self._validate_rss(canon)
+            if not is_valid:
+                LOG.warning("❌ AI feed rejected (invalid RSS): %s", canon)
+                continue
+
+            # add if valid
+            current_feeds.append(canon)
+            all_existing.add(canon)
+            added_count += 1
+
+            LOG.info("✅ AI feed accepted: %s", canon)
+
         if added_count > 0:
             self._save_ai_feeds(current_feeds)
-            
+
         return added_count
+
 
     # ------------------------------------------------------------------ #
     # HTML helpers (shared)
@@ -1017,6 +1048,29 @@ class RSSService:
 
             global_candidates: list[str] = self.GLOBAL_FEEDS.copy() if keywords and self.GLOBAL_FEEDS else []
 
+            # --- GLOBAL FEEDS batching ---
+            global_feeds = global_candidates
+            if keywords and global_feeds:
+                gbatch_size = int(getattr(settings, "global_batch_size", 20))
+
+                gstart = self._cursor_global.get(cid_int, 0)
+                if gstart >= len(global_feeds):
+                    gstart = 0
+
+                gend = min(len(global_feeds), gstart + gbatch_size)
+                batch_global = global_feeds[gstart:gend]
+
+                gnext = gend if gend < len(global_feeds) else 0
+                self._cursor_global[cid_int] = gnext
+
+                LOG.info(
+                    "GLOBAL POLLING chat=%s total=%d batch_size=%d (start=%d end=%d next=%d)",
+                    cid_int, len(global_feeds), gbatch_size, gstart, gend, gnext
+                )
+
+            else:
+                batch_global = []
+
             # اگر نه فید کاربر داریم و نه کی‌ورد، رد شو
             if not user_feeds and not keywords:
                 continue
@@ -1032,8 +1086,10 @@ class RSSService:
             next_index = end if end < len(user_feeds) else 0
             self._cursor_per_chat[cid_int] = next_index
 
-            LOG.info("Polling chat=%s user_feeds_total=%d batch=%d (start=%d next=%d) admin_candidates=%d",
-                     cid_int, len(user_feeds), len(batch_user), start, next_index, len(admin_candidates))
+            LOG.info(
+                "USER POLLING chat=%s total=%d batch_size=%d (start=%d end=%d next=%d)",
+                cid_int, len(user_feeds), batch_size, start, end, next_index
+            )
 
             # concurrency limiter
             concurrency = int(getattr(settings, "rss_fetch_concurrency", 6))
@@ -1079,9 +1135,9 @@ class RSSService:
             # --- اگر کی‌ورد هست، اسکن ادمین‌ها برای کی‌وردها (فقط جمع‌آوری matches، نه ارسال per-entry) ---
             admin_scan_tasks = []
             if keywords and admin_candidates:
-                global_fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in global_candidates]
+                global_fetch_tasks = [asyncio.create_task(_fetch_with_sem(u)) for u in batch_global]
                 global_results = await asyncio.gather(*global_fetch_tasks, return_exceptions=True)
-                for url, res in zip(global_candidates, global_results):
+                for url, res in zip(batch_global, global_results):
                     if isinstance(res, Exception) or not res:
                         LOG.debug("No admin feed parsed for %s (chat=%s): %s", url, cid_int, res)
                         continue

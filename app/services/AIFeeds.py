@@ -19,37 +19,48 @@ class AIFeedsService:
             "gemini-2.5-flash",
             generation_config={
                 "temperature": 0.3,
-                "max_output_tokens": 2000,
+                "max_output_tokens": 3000,
             }
         )
 
-    async def generate_list(self, topic: str, max_results: int = 4) -> List[str]:
+    async def generate_list(self, topic: str, lang: str = "en", max_results: int = 4) -> List[str]:
+
+        # زبان از کلیدواژه کاربر است
+        if lang == "fa":
+            lang_instruction = (
+                "The RSS feeds MUST belong to Iranian / Persian sources, news agencies, "
+                "Persian tech websites, Persian blogs, or Persian media.\n"
+                "Examples of allowed domains: iribnews, isna, irna, mehrnews, tasnimnews, khabaronline, zoomit, digiato.\n"
+            )
+        else:
+            lang_instruction = (
+                "The RSS feeds MUST belong to English international news or tech sources.\n"
+                "Examples: Reuters, BBC, CNN, TechCrunch, Wired, Verge, APNews.\n"
+            )
 
         prompt = (
-            "You are a web assistant. Provide a SHORT list of well-known, high-traffic **news and technical websites** "
-            f"related to this topic: '{topic}'. "
-            "The links must be only the main RSS feeds. "
-            "Return ONLY RSS feeds, one URL per line. No explanation, introduction, or formatting."
-            "Important: Fine rss links eccording to user's lang. If the lang is persian, return links from persian sources. IN General pay attention to the user's lang"
+            f"You are an RSS feed expert.\n"
+            f"User keyword: '{topic}'\n"
+            f"User language: {lang}\n\n"
+            f"{lang_instruction}"
+            "Return ONLY real RSS/Atom URLs.\n"
+            "- Do NOT invent links.\n"
+            "- Only return feeds you are 100% sure exist.\n"
+            "- MUST be RSS/Atom, not homepages.\n"
+            "- One URL per line.\n"
+            "- No explanation.\n"
         )
 
         try:
-            # --- Call blocking SDK in thread ---
             resp = await asyncio.to_thread(self.model.generate_content, prompt)
 
-            # ---- SAFETY & EMPTY CHECK ----
             if not resp or not resp.candidates:
-                LOG.error("❌ No candidates returned")
                 return []
 
             cand = resp.candidates[0]
-
-            # If model blocked / safety
-            if cand.finish_reason != 1:   # 1 == SUCCESS
-                LOG.warning(f"⚠️ Gemini finish_reason = {cand.finish_reason}")
+            if cand.finish_reason != 1:
                 return []
 
-            # ---- Extract TEXT safely ----
             out = getattr(resp, "text", "") or ""
 
             urls = [
@@ -60,6 +71,6 @@ class AIFeedsService:
 
             return urls[:max_results]
 
-        except Exception as e:
-            LOG.error(f"Gemini error: {e}")
+        except Exception:
             return []
+
