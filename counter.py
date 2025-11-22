@@ -128,37 +128,12 @@ def monitor_seen_table():
         if total_keywords > 0:
             percent = (active_keywords / total_keywords) * 100
 
-        # --- محاسبه درصد لینک‌های فعال ---
-        conn = sqlite3.connect(DB_PATH)
-        cur = conn.cursor()
-
-        # تعداد کل لینک‌ها
-        cur.execute("SELECT COUNT(*) FROM feeds")
-        total_links = cur.fetchone()[0]
-
-        # تعداد لینک‌هایی که seen جدید داشته‌اند
-        cur.execute("""
-            SELECT COUNT(DISTINCT feed_url)
-            FROM seen
-            WHERE created_at >= ?
-        """, ((datetime.utcnow() - timedelta(hours=SEEN_CHECK_INTERVAL_HOURS)).isoformat(),))
-        active_links = cur.fetchone()[0]
-
-        conn.close()
-
-        # محاسبه درصد لینک‌ها
-        percent_links = 0
-        if total_links > 0:
-            percent_links = (active_links / total_links) * 100
-
         # ساخت پیام
         message = (
             f"⏱ گزارش مانیتورینگ در {now_str}\n"
             f"📨 در {SEEN_CHECK_INTERVAL_HOURS} ساعت گذشته، {count} فید ارسال شده است ✅\n"
-            f"📊 درصد کلیدواژه‌های فعال: {percent:.2f}%\n"
-            f"🔗 درصد لینک‌های فعال: {percent_links:.2f}%"
+            f"به {percent:.2f}% از کلیدواژه‌ها فید ارسال شده."
         )
-
 
         print(message)
         send_telegram_message(message)
