@@ -770,7 +770,10 @@ class RSSService:
         if url in AI_FEEDS and url not in ADMIN_FEEDS:
             LOG.info("Skipping direct processing for AI feed: %s", url)
             return
-
+        
+        if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS:
+            return
+        
         try:
             
             keywords = [k["keyword"].lower() for k in self.store.list_keywords(cid_int)]
@@ -1114,8 +1117,14 @@ class RSSService:
             # - اگر parse شد: _process_feed با f
             # - اگر parse نشد: چک کن providerها را؛ اگر one matches -> call _process_feed(..., None)
             for url, res in zip(batch_user, results):
+                if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS:
+                    continue
+                
                 if isinstance(res, Exception) or not res:
                     # ممکنه فید نباشه؛ بررسی provider ها (مثال: custom providers مثل vipgold)
+                    if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS:
+                        continue
+                    
                     matched = False
                     for matcher, fn in PROVIDERS:
                         try:

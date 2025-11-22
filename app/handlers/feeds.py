@@ -649,11 +649,39 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
             keywords.append({"keyword": f"{k['keyword']}"})
 
     # ✅ فیلتر کردن فیدهای سیستمی مثل divar_seen::
-    feeds = [
-        f for f in feeds
-        if not f.startswith("divar_seen::")
-        and f not in AI_FEEDS
+    # feeds = [
+    #     f for f in feeds
+    #     if not f.startswith("divar_seen::")
+    #     and f not in AI_FEEDS
+    # ]
+    
+    # --- فیدهای سیستمی و هوش‌مصنوعی نباید به کاربر نمایش داده شوند ---
+    system_patterns = [
+        "divar_seen::",
+        "/vip/goldir",
+        "divar.ir/s/",
+        "takhfifan.com",
+        "khanoumi.com/tags/takhfif50"
     ]
+
+    system_ai_feeds = set(AI_FEEDS.keys()) if isinstance(AI_FEEDS, dict) else set(AI_FEEDS)
+
+    # فیلتر فیدهای غیرمجاز
+    filtered_feeds = []
+    for f in feeds:
+        ff = f.lower()
+
+        # حذف فیدهای AI
+        if f in system_ai_feeds:
+            continue
+
+        # حذف فیدهای ادمینی / سیستمی
+        if any(p in ff for p in system_patterns):
+            continue
+
+        filtered_feeds.append(f)
+
+    feeds = filtered_feeds
 
     # ✅ اگر هیچ موردی ثبت نشده بود
     if not feeds and not keywords:
