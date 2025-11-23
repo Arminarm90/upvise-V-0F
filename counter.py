@@ -109,11 +109,9 @@ def monitor_seen_table():
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
 
-        # تعداد کل کلیدواژه‌ها
         cur.execute("SELECT COUNT(*) FROM user_keywords")
         total_keywords = cur.fetchone()[0]
 
-        # تعداد کلیدواژه‌هایی که حداقل یک keyword_event داشتند
         cur.execute("""
             SELECT COUNT(DISTINCT keyword)
             FROM keyword_events
@@ -121,24 +119,43 @@ def monitor_seen_table():
         """, ((datetime.utcnow() - timedelta(hours=SEEN_CHECK_INTERVAL_HOURS)).isoformat(),))
         active_keywords = cur.fetchone()[0]
 
+        # -------- 🔥 خط جدید برای محاسبه درصد لینک‌های فعال ----------
+        # تعداد کل لینک‌ها
+        cur.execute("SELECT COUNT(*) FROM feeds")
+        total_feeds = cur.fetchone()[0]
+
+        # تعداد لینک‌هایی که در بازه زمانی فید داشته‌اند
+        cur.execute("""
+            SELECT COUNT(DISTINCT feed_url)
+            FROM seen
+            WHERE created_at >= ?
+        """, ((datetime.utcnow() - timedelta(hours=SEEN_CHECK_INTERVAL_HOURS)).isoformat(),))
+        active_feeds = cur.fetchone()[0]
+
+        feed_percent = 0
+        if total_feeds > 0:
+            feed_percent = (active_feeds / total_feeds) * 100
+        # --------------------------------------------------------------
+
         conn.close()
 
-        # محاسبه درصد
         percent = 0
         if total_keywords > 0:
             percent = (active_keywords / total_keywords) * 100
 
-        # ساخت پیام
+        # ساخت پیام (فقط یک خط جدید اضافه شده)
         message = (
             f"⏱ گزارش مانیتورینگ در {now_str}\n"
             f"📨 در {SEEN_CHECK_INTERVAL_HOURS} ساعت گذشته، {count} فید ارسال شده است ✅\n"
-            f"به {percent:.2f}% از کلیدواژه‌ها فید ارسال شده."
+            f"📚 به {percent:.2f}% از کلیدواژه‌ها فید ارسال شده.\n"
+            f"🔗 به {feed_percent:.2f}% از لینک‌ها فید ارسال شده."    # 👈 فقط همین خط اضافه شده
         )
 
         print(message)
         send_telegram_message(message)
 
         time.sleep(SEEN_CHECK_INTERVAL_HOURS * 3600)
+
 
 
 

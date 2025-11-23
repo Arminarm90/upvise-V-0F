@@ -256,7 +256,8 @@ class SQLiteStateStore:
             # PRAGMAs for better concurrency and safety
             cur.execute("PRAGMA journal_mode=WAL;")
             cur.execute("PRAGMA foreign_keys=ON;")
-
+            cur.execute("PRAGMA table_info(seen);")
+            
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chats (
@@ -292,6 +293,14 @@ class SQLiteStateStore:
                 )
                 """
             )
+            
+            seen_cols = [r["name"] for r in cur.fetchall()]
+            if "created_at" not in seen_cols:
+                try:
+                    cur.execute("ALTER TABLE seen ADD COLUMN created_at TEXT;")
+                except Exception:
+                    pass
+                
             cur.execute(
             """
                 CREATE TABLE IF NOT EXISTS kv (
@@ -609,7 +618,7 @@ class SQLiteStateStore:
             )
             for it in (seen_set or []):
                 cur.execute(
-                    "INSERT OR IGNORE INTO seen(chat_id, feed_url, item_id) VALUES(?, ?, ?)",
+                    "INSERT OR IGNORE INTO seen(chat_id, feed_url, item_id, created_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP)",
                     (cid, u, str(it)),
                 )
 
