@@ -285,6 +285,40 @@ class RSSService:
 
         return added_count
 
+    # Google Search (When no feed found from urls)
+    async def _google_rss_search(self, keyword: str, lang: str = "en") -> list[dict]: # تغییر نوع خروجی به list[dict]
+        """
+        وقتی فید از GLOBAL / AI / USER پیدا نشد، از Google News RSS جستجو می‌کنیم.
+        """
+        try:
+            if lang == "fa":
+                url = f"https://news.google.com/rss/search?q={keyword}&hl=fa&gl=IR&ceid=IR:fa"
+            else:
+                url = f"https://news.google.com/rss/search?q={keyword}&hl=en&gl=US&ceid=US:en"
+
+            feed = await self._fetch_feed(url)
+            if not feed:
+                LOG.warning("Google RSS search returned no feed for %s", keyword)
+                return []
+
+            results = []
+            for entry in feed.entries[:10]:
+                if "link" in entry:
+                    
+                    # 🆕 (Issue 1) فیلتر کردن نتایج انگلیسی برای کلمات کلیدی فارسی
+                    if lang == "fa":
+                        entry_text = getattr(entry, "title", "") + " " + getattr(entry, "summary", "")
+                        if detect_lang(entry_text) != "fa":
+                            continue 
+                            
+                    results.append(entry) 
+
+            LOG.info("Google RSS search produced %d entries for keyword '%s'", len(results), keyword)
+            return results
+
+        except Exception as e:
+            LOG.warning("Google RSS search error for %s: %s", keyword, e)
+            return []
 
     # ------------------------------------------------------------------ #
     # HTML helpers (shared)
@@ -671,8 +705,11 @@ class RSSService:
         cid = str(chat_id)
 
         # فید ادمین → کلید جدا در جدول seen
-        if url in ADMIN_FEEDS or url.startswith("admin::"):
+        if url in ADMIN_FEEDS or url.startswith("seen_admin::"):
             safe_key = f"seen_admin::{url}"
+        # کلیدواژه گوگل → کلید جداگانه
+        elif url.startswith("goog::"):
+            safe_key = url  # استفاده از خود کلیدواژه به عنوان کلید
         else:
             safe_key = url
 
@@ -688,13 +725,14 @@ class RSSService:
         """
         cid = str(chat_id)
 
-        if url in ADMIN_FEEDS or url.startswith("admin::"):
+        if url in ADMIN_FEEDS or url.startswith("seen_admin::"):
             safe_key = f"seen_admin::{url}"
+        elif url.startswith("goog::"):
+            safe_key = url  # استفاده از خود کلیدواژه به عنوان کلید
         else:
             safe_key = url
 
         try:
-            # این فقط جدول seen رو آپدیت می‌کنه، جدول feeds رو تغییر نمی‌ده
             self.store.set_seen(cid, safe_key, seen)
         except Exception:
             pass
@@ -771,7 +809,7 @@ class RSSService:
             LOG.info("Skipping direct processing for AI feed: %s", url)
             return
         
-        if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS:
+        if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS or "news.google.com/rss" in url:
             return
         
         try:
@@ -892,7 +930,11 @@ class RSSService:
                     continue
                 new_entries.append((eid, e))
 
-            feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
+            if f:
+                feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
+            else:
+                # fallback: extract source from entry link, not from Google
+                feed_title = urlparse(link).netloc.replace("www.", "")
 
             for eid, e in reversed(new_entries):
                 title_text = (getattr(e, "title", "") or "").strip()
@@ -1117,9 +1159,6 @@ class RSSService:
             # - اگر parse شد: _process_feed با f
             # - اگر parse نشد: چک کن providerها را؛ اگر one matches -> call _process_feed(..., None)
             for url, res in zip(batch_user, results):
-                if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS:
-                    continue
-                
                 if isinstance(res, Exception) or not res:
                     # ممکنه فید نباشه؛ بررسی provider ها (مثال: custom providers مثل vipgold)
                     if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS:
@@ -1152,7 +1191,57 @@ class RSSService:
                         continue
                     # collect matches from admin feeds (do NOT call _process_feed on them)
                     admin_scan_tasks.append(asyncio.create_task(self._collect_matches_from_feed(res, url, cid_int, keywords)))
+                    
+            # After finishing scan of user feeds + global feeds:
+            for kw in keywords:
+                matches = self._keyword_global_matches.get(cid_int, {}).get(kw, [])
 
+                if not matches:
+                    LOG.info("No matches for '%s' — using Google RSS fallback", kw)
+                    lang = detect_lang(kw)
+                    google_entries = await self._google_rss_search(kw, lang=lang)
+
+                    # کلید seen مخصوص برای کلیدواژه گوگل
+                    google_seen_key = f"goog_kw::{kw}"
+                    db_seen = self._get_seen_safe(cid_int, google_seen_key)
+                    
+                    # 🟢 ایجاد یک کپی برای آپدیت در حین پردازش
+                    current_seen = set(db_seen)
+                    
+                    for entry in google_entries: 
+                        try:
+                            raw_link = getattr(entry, "link", "")
+                            
+                            # 🟢 دریافت لینک نهایی پس از ریدایرکت
+                            final_link = raw_link
+                            try:
+                                async with httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+                                    response = await client.head(raw_link)
+                                    final_link = str(response.url)
+                            except Exception:
+                                final_link = raw_link
+                            
+                            # 🟢 پاکسازی لینک نهایی - حذف پارامترهای اضافی
+                            parsed = urlparse(final_link)
+                            clean_link = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+                            
+                            # 🟢 تولید stable_eid بر اساس ترکیب keyword + clean_link
+                            base_id = clean_link
+                            stable_eid = f"goog::{hash(f'{kw}_{base_id}') & 0xFFFFFFFF}"
+                            
+                            # 🟢 استفاده از current_seen که در حین پردازش آپدیت می‌شود
+                            if stable_eid in current_seen:
+                                continue
+                                
+                            tup = (stable_eid, entry, None, clean_link)
+                            self._keyword_global_matches.setdefault(cid_int, {}).setdefault(kw, []).append(tup)
+                            self._keyword_seen_global.setdefault(cid_int, set()).add(stable_eid)
+                            
+                            # 🟢 آپدیت current_seen برای جلوگیری از تکراری در همین حلقه
+                            current_seen.add(stable_eid)
+                            
+                        except Exception as ex:
+                            LOG.warning("Google RSS fallback processing failed for entry (keyword %s): %s", kw, ex)
             # منتظر بمون که همه پردازش‌های فید کاربر تموم بشن
             if proc_tasks:
                 await asyncio.gather(*proc_tasks, return_exceptions=True)
@@ -1173,8 +1262,21 @@ class RSSService:
                     if not matches:
                         continue
 
-                    # filter out items already marked seen in DB (to avoid duplicates)
-                    filtered = list(matches)
+
+                    filtered = []
+                    for match in matches:
+                        eid, e, f, url = match
+                        
+                        # تعیین کلید seen مناسب
+                        if f is None or "news.google.com" in url or "goog::" in eid:
+                            seen_key = f"goog_kw::{kw}"  # برای گوگل از کلید keyword-based استفاده کن
+                        else:
+                            seen_key = url
+                        
+                        # چک کردن seen با کلید صحیح
+                        db_seen = self._get_seen_safe(cid_int, seen_key)
+                        if eid not in db_seen:
+                            filtered.append(match)
 
                     if not filtered:
                         continue
@@ -1187,7 +1289,7 @@ class RSSService:
                             header = f"{len(chunk)} نتیجه جدید برای #{kw}\n\n"
                         else:
                             header = f"{len(chunk)} new results for #{kw.capitalize()}\n\n"     
-                                               
+                                            
                         parts = []
                         for i, (eid, e, f, url) in enumerate(chunk, start=1):
                             title = getattr(e, "title", "") or ""
@@ -1195,9 +1297,25 @@ class RSSService:
                             feed_title = getattr(getattr(f, "feed", object()), "title", "") or urlparse(url).netloc
                             date = _fmt_date(e)
 
-                            raw_snippet = getattr(e, "summary", "") or getattr(e, "description", "") or ""
-                            clean_snippet = BeautifulSoup(raw_snippet, "html.parser").get_text(" ", strip=True)
-                            clean_snippet = re.sub(r"\s+", " ", clean_snippet).strip()[:400]
+                            # اگر فید واقعی بود: همون snippet قدیمی
+                            if f:
+                                raw_snippet = getattr(e, "summary", "") or getattr(e, "description", "") or ""
+                                clean_snippet = BeautifulSoup(raw_snippet, "html.parser").get_text(" ", strip=True)
+                                clean_snippet = re.sub(r"\s+", " ", clean_snippet).strip()[:400]
+
+                            # اگر fallback گوگل است: snippet را از HTML اصلی بگیر
+                            else:
+                                clean_snippet = ""
+                                try:
+                                    html = await self._get_html(link)
+                                    if html:
+                                        soup = BeautifulSoup(html, "html.parser")
+                                        for t in soup(["script", "style", "noscript"]):
+                                            t.decompose()
+                                        text = soup.get_text(" ", strip=True)
+                                        clean_snippet = re.sub(r"\s+", " ", text).strip()[:400]
+                                except Exception:
+                                    clean_snippet = ""
 
                             # زمان نسبی انتشار
                             published_dt = None
@@ -1212,10 +1330,7 @@ class RSSService:
                                 time_str = f"🕒 {rel_time}"
                             else:
                                 time_str = ""
- 
-                            clean_snippet = BeautifulSoup(raw_snippet, "html.parser").get_text(" ", strip=True)
-                            clean_snippet = re.sub(r"\s+", " ", clean_snippet).strip()[:400]  
-                                                          
+        
                             if clean_snippet:
                                 snippet_part = f"📌 {esc(clean_snippet)}\n"
                             else:
@@ -1236,38 +1351,38 @@ class RSSService:
                                 parse_mode="HTML",
                                 disable_web_page_preview=True,
                             )
+                            
+                            # 🔴 اصلاح: ثبت seen بعد از ارسال موفق با منطق یکسان
+                            for match in chunk:
+                                eid, e, f, url = match
+                                
+                                # تعیین کلید seen مناسب (همان منطق فیلتر کردن)
+                                if f is None or "news.google.com" in url or "goog::" in eid:
+                                    seen_key = f"goog_kw::{kw}"
+                                else:
+                                    seen_key = url
+                                
+                                # ثبت نهایی
+                                seen_set = self._get_seen_safe(cid_int, seen_key)
+                                seen_set.add(eid)
+                                self._set_seen_safe(cid_int, seen_key, seen_set)
+                                
+                                # لاگ کردن رویداد
+                                try:
+                                    self.store.log_keyword_event(
+                                        chat_id=cid_int,
+                                        keyword=kw,
+                                        feed_url=url,
+                                        item_id=eid,
+                                        ts=datetime.utcnow().isoformat()
+                                    )
+                                except Exception as ex:
+                                    LOG.error("Failed to log keyword event: %s", ex)
+
+                            self.stats["sent"] += len(chunk)
+                            
                         except Exception:
                             LOG.debug("send keyword aggregate failed for cid=%s kw=%s", cid_int, kw, exc_info=True)
-
-                        # بعد از ارسال، همه‌ی آیتم‌های chunk رو در seen ثبت کن تا دورِ بعدی تکراری نیاد
-                        # بعد از ارسال، فقط برای فیدهایی که کاربر واقعاً آنها را دارد در DB ثبت کن.
-                        # (تا admin feeds به لیست لینک‌های کاربر اضافه نشوند)
-                        
-                        for _, e, _, url in chunk:
-                            eid = self.entry_id(e)
-                            try:
-                                self.store.log_keyword_event(
-                                    chat_id=cid_int,
-                                    keyword=kw,
-                                    feed_url=url,
-                                    item_id=eid,
-                                    ts=datetime.utcnow().isoformat()
-                                )
-                            except Exception as ex:
-                                LOG.error("Failed to log keyword event: %s", ex)                        
-                        
-                        for _, e, _, url in chunk:
-                            eid = self.entry_id(e)
-                            try:
-                                seen = self._get_seen_safe(cid_int, url)
-                                seen.add(eid)
-                                self._set_seen_safe(cid_int, url, seen)
-                            except Exception:
-                                LOG.debug("failed to persist keyword-seen for %s (cid=%s)", url, cid_int, exc_info=True)
-
-
-
-                        self.stats["sent"] += len(chunk)
 
                 # پاک‌سازی بعد از ارسال
                 self._keyword_global_matches[cid_int].clear()

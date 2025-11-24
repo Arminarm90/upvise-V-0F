@@ -594,8 +594,12 @@ class SQLiteStateStore:
         cid = str(chat_id)
         u = str(url)
 
-        # اگر فید از نوع خاص (ادمین یا اختصاصی) است
-        is_special_feed = u.startswith("seen_admin::") or u.startswith("takhfifan_seen::")
+        # اگر فید از نوع خاص (ادمین، کلیدواژه گوگل یا اختصاصی) است
+        is_special_feed = (
+            u.startswith("seen_admin::") or 
+            u.startswith("goog_kw::") or 
+            u.startswith("takhfifan_seen::")
+        )
 
         with self._locked_cursor() as cur:
             # اطمینان از وجود کاربر
@@ -621,7 +625,6 @@ class SQLiteStateStore:
                     "INSERT OR IGNORE INTO seen(chat_id, feed_url, item_id, created_at) VALUES(?, ?, ?, CURRENT_TIMESTAMP)",
                     (cid, u, str(it)),
                 )
-
     # For groups and channels, set the owner user ID
     def set_owner(self, chat_id: int | str, owner_id: int | str) -> None:
         """ثبت مالک گروه یا کانال (کاربر ایجادکننده فید)."""
