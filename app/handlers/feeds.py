@@ -638,45 +638,45 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for r in owned_chats:
         gid = r["chat_id"]
-        # gname = r["name"] or f"ID {gid}"
         g_feeds = store.list_feeds(gid)
         g_keywords = store.list_keywords(gid)
 
-        # هر آیتم رو با نام چنل/گروه اضافه می‌کنیم (برچسب‌دار)
         for f in g_feeds:
-            feeds.append(f"{f}")
+            feeds.append(f)
         for k in g_keywords:
-            keywords.append({"keyword": f"{k['keyword']}"})
+            keywords.append({"keyword": k['keyword']})
 
-    # ✅ فیلتر کردن فیدهای سیستمی مثل divar_seen::
-    # feeds = [
-    #     f for f in feeds
-    #     if not f.startswith("divar_seen::")
-    #     and f not in AI_FEEDS
-    # ]
-    
-    # --- فیدهای سیستمی و هوش‌مصنوعی نباید به کاربر نمایش داده شوند ---
+    # --- فیلتر کردن پیشرفته‌تر برای حذف فیدهای سیستمی ---
     system_patterns = [
         "divar_seen::",
+        "global_seen::",  # 🆕 اضافه کردن فیدهای گلوبال
         "/vip/goldir",
         "divar.ir/s/",
         "takhfifan.com",
         "khanoumi.com/tags/takhfif50"
     ]
 
-    system_ai_feeds = set(AI_FEEDS.keys()) if isinstance(AI_FEEDS, dict) else set(AI_FEEDS)
+    # 🆕 دریافت لیست فیدهای گلوبال از RSS سرویس
+    rss_service = context.bot_data.get("rss")
+    global_feeds = []
+    if rss_service:
+        global_feeds = getattr(rss_service, "GLOBAL_FEEDS", [])
+    
+    system_ai_feeds = set(AI_FEEDS) if isinstance(AI_FEEDS, list) else set()
 
     # فیلتر فیدهای غیرمجاز
     filtered_feeds = []
     for f in feeds:
-        ff = f.lower()
-
         # حذف فیدهای AI
         if f in system_ai_feeds:
             continue
-
+            
+        # 🆕 حذف فیدهای گلوبال
+        if f in global_feeds:
+            continue
+            
         # حذف فیدهای ادمینی / سیستمی
-        if any(p in ff for p in system_patterns):
+        if any(p in f.lower() for p in system_patterns):
             continue
 
         filtered_feeds.append(f)
@@ -707,7 +707,7 @@ async def list_feeds(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = "\n\n".join(msg_parts)
 
-    # ✅ دکمه‌ها هم مثل قبل
+    # ✅ دکمه‌ها
     keyboard = [
         [
             InlineKeyboardButton(t("btn.add", lang), callback_data="list:add"),
