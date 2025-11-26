@@ -700,7 +700,7 @@ class RSSService:
         cid = str(chat_id)
         
         # استفاده از یک منطق ثابت برای همه فیدهای گلوبال
-        if url in ADMIN_FEEDS or url in AI_FEEDS or url in self.GLOBAL_FEEDS:
+        if url in self.GLOBAL_FEEDS:
             safe_key = f"global_seen::{url}"
         elif url.startswith("goog::"):
             safe_key = url
@@ -716,7 +716,7 @@ class RSSService:
         cid = str(chat_id)
 
         # استفاده از همان منطق _get_seen_safe
-        if url in ADMIN_FEEDS or url in AI_FEEDS or url in self.GLOBAL_FEEDS:
+        if url in self.GLOBAL_FEEDS:
             safe_key = f"global_seen::{url}"
         elif url.startswith("goog::"):
             safe_key = url
@@ -821,6 +821,14 @@ class RSSService:
         current_feeds = set(self.store.list_feeds(cid_int))
         keywords_exist = bool(self.store.list_keywords(cid_int))
 
+        # 🟢 **تغییر مهم**: اگر فید گلوبال هست و کاربر explicit اضافه نکرده، فقط برای کیورد اسکن کن
+        is_global_feed = url in self.GLOBAL_FEEDS
+        if is_global_feed and url not in current_feeds:
+            # فقط کیوردها رو اسکن کن، پیام ارسال نکن
+            if keywords_exist:
+                await self._collect_matches_from_feed(f, url, cid_int, [k["keyword"].lower() for k in self.store.list_keywords(cid_int)])
+            return
+
         # ✅ اگر فید در دیتابیس نیست و نه در admin_feeds است و نه keyword داریم → skip
         if url not in current_feeds and url not in ADMIN_FEEDS and not keywords_exist:
             LOG.info("⏩ skipping %s for chat=%s because feed was removed", url, cid_int)
@@ -829,10 +837,6 @@ class RSSService:
         # 🟢 اصلاح: اجازه پردازش فیدهای AI برای کیورد اسکن
         if url in AI_FEEDS and url not in ADMIN_FEEDS and not keywords_exist:
             LOG.info("Skipping AI feed without keywords: %s", url)
-            return
-
-        # 🟢 اصلاح: فیدهای گلوبال باید برای کیورد اسکن پردازش بشن
-        if (url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS) and not keywords_exist:
             return
 
         
@@ -1113,6 +1117,10 @@ class RSSService:
             # --- آماده سازی فیدهای کاربر و کاندیدهای ادمین (ادمین فقط برای اسکن کی‌ورد) ---
             user_feeds: list[str] = list(self.store.list_feeds(cid_int))
             keywords = [k["keyword"].lower() for k in self.store.list_keywords(cid_int)]
+            
+            # 🟢 **تغییر ساده: فیلتر کردن فیدهای گلوبال از user_feeds**
+            user_feeds = [url for url in user_feeds if url not in self.GLOBAL_FEEDS]
+            
             admin_candidates: list[str] = ADMIN_FEEDS.copy() if (keywords and ADMIN_FEEDS) else []
 
             # 🟢 اصلاح: همیشه global_candidates رو بساز، حتی اگر keywords خالی باشه
@@ -1155,7 +1163,6 @@ class RSSService:
                 "USER POLLING chat=%s total=%d batch_size=%d (start=%d end=%d next=%d)",
                 cid_int, len(user_feeds), batch_size, start, end, next_index
             )
-
             # concurrency limiter
             concurrency = int(getattr(settings, "rss_fetch_concurrency", 6))
             sem = asyncio.Semaphore(concurrency)
