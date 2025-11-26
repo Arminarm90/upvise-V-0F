@@ -4,3 +4,40 @@ admin_feeds:
   - https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml
   - https://feeds.bbci.co.uk/news/technology/rss.xml
   - https://news.google.com/rss
+  # فناوری و AI
+  - https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml
+  - https://feeds.bbci.co.uk/news/technology/rss.xml
+  - https://feeds.arstechnica.com/arstechnica/index
+  - https://www.wired.com/feed/rss
+  - https://feeds.feedburner.com/TechCrunch/
+  - https://www.theverge.com/rss/index.xml
+  - https://feeds.mashable.com/Mashable
+  - https://www.digitaltrends.com/feed/
+  
+  # کسب و کار و استارتاپ
+  - https://rss.nytimes.com/services/xml/rss/nyt/Business.xml
+  - https://feeds.bbci.co.uk/news/business/rss.xml
+  - https://www.forbes.com/business/feed/
+  - https://www.entrepreneur.com/business-news.rss
+  
+  # فشن و طراحی
+  - https://www.vogue.com/feed/rss
+  - https://www.harpersbazaar.com/feed/rss
+  - https://www.thefashionspot.com/feed/
+  - https://www.designweek.co.uk/feed/
+  
+  # بازاریابی و SEO
+  - https://www.searchenginejournal.com/feed/
+  - https://www.socialmediaexaminer.com/feed/
+  - https://www.marketingweek.com/feed/
+  - https://www.contentmarketinginstitute.com/feed/
+  
+  # امنیت و cybersecurity
+  - https://www.darkreading.com/rss.xml
+  - https://www.securityweek.com/rss
+  - https://www.helpnetsecurity.com/feed/
+  
+  # منابع عمومی
+  - https://news.google.com/rss
+  - https://feeds.reuters.com/reuters/topNews
+  - https://rss.cnn.com/rss/edition.rss

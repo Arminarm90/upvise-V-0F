@@ -218,7 +218,7 @@ class RSSService:
         try:
             # 3. فراخوانی متد generate_list از سرویس هوش مصنوعی
             lang = detect_lang(keyword)
-            generated_list = await self.AIFeads.generate_list(keyword, lang=lang, max_results=4)
+            generated_list = await self.AIFeads.generate_list(keyword, lang=lang, max_results=6)
             
             print("hereeeeeee ====", generated_list)
             
@@ -697,19 +697,13 @@ class RSSService:
         return header + "\n".join(body_parts).strip()
 
     def _get_seen_safe(self, chat_id: int, url: str) -> set[str]:
-        """
-        خواندن داده‌های seen.
-        برای admin-feeds از prefix خاص در DB استفاده می‌شود تا بعد از ری‌استارت تکراری نشود،
-        ولی وارد جدول feeds کاربر نشود.
-        """
         cid = str(chat_id)
-
-        # فید ادمین → کلید جدا در جدول seen
-        if url in ADMIN_FEEDS or url.startswith("seen_admin::"):
-            safe_key = f"seen_admin::{url}"
-        # کلیدواژه گوگل → کلید جداگانه
+        
+        # استفاده از یک منطق ثابت برای همه فیدهای گلوبال
+        if url in ADMIN_FEEDS or url in AI_FEEDS or url in self.GLOBAL_FEEDS:
+            safe_key = f"global_seen::{url}"
         elif url.startswith("goog::"):
-            safe_key = url  # استفاده از خود کلیدواژه به عنوان کلید
+            safe_key = url
         else:
             safe_key = url
 
@@ -719,16 +713,13 @@ class RSSService:
             return set()
 
     def _set_seen_safe(self, chat_id: int, url: str, seen: set[str]) -> None:
-        """
-        ذخیره‌ی داده‌های seen:
-        برای admin-feeds در DB با prefix جدا ذخیره می‌شود (بدون ورود به جدول feeds).
-        """
         cid = str(chat_id)
 
-        if url in ADMIN_FEEDS or url.startswith("seen_admin::"):
-            safe_key = f"seen_admin::{url}"
+        # استفاده از همان منطق _get_seen_safe
+        if url in ADMIN_FEEDS or url in AI_FEEDS or url in self.GLOBAL_FEEDS:
+            safe_key = f"global_seen::{url}"
         elif url.startswith("goog::"):
-            safe_key = url  # استفاده از خود کلیدواژه به عنوان کلید
+            safe_key = url
         else:
             safe_key = url
 
@@ -738,14 +729,7 @@ class RSSService:
             pass
 
 
-
-
     async def _collect_matches_from_feed(self, f, url: str, cid_int: int, keywords: List[str]):
-        """
-        فقط برای admin-feeds (یا هر فیدی که می‌خواهیم صرفاً برای keyword scan بخوانیم).
-        آیتم‌هایی که با keywords منطبقند را در self._keyword_global_matches[cid] جمع می‌کند.
-        (این تابع تغییری در seen دیتابیس ایجاد نمی‌کند؛ ثبت در seen بعد از ارسال aggregate انجام می‌شود.)
-        """
         if not f or not getattr(f, "entries", None):
             return
 
@@ -756,38 +740,76 @@ class RSSService:
         global_kw = self._keyword_global_matches[cid_int]
         seen_global = self._keyword_seen_global[cid_int]
 
-        cap = int(getattr(settings, "rss_max_items_per_feed", 10))
-        entries = (getattr(f, "entries", []) or [])[:cap]
-
-        for e in entries:
-            eid = self.entry_id(e) if "trends.google.com" not in url else f"trend:{(getattr(e,'title','') or '').strip()}"
+        cap = int(getattr(settings, "rss_max_items_per_feed", 20))  # افزایش به 20
+        
+        for e in getattr(f, "entries", [])[:cap]:
+            eid = self.entry_id(e)
             if not eid or eid in seen_global:
                 continue
 
-            # Skip if DB already marked seen for this feed (avoid collecting duplicates)
-            try:
-                db_seen = self._get_seen_safe(cid_int, url)
-                if eid in db_seen:
-                    seen_global.add(eid)
-                    continue
-            except Exception:
-                db_seen = set()
+            # چک کردن دیده شدن
+            db_seen = self._get_seen_safe(cid_int, url)
+            if eid in db_seen:
+                seen_global.add(eid)
+                continue
 
-            title = getattr(e, "title", "") or ""
-            desc = getattr(e, "summary", "") or getattr(e, "description", "") or ""
-            text = f"{title}\n{desc}"
-
+            title = (getattr(e, "title", "") or "").lower()
+            desc = (getattr(e, "summary", "") or getattr(e, "description", "") or "").lower()
+            link = getattr(e, "link", "") or ""
+            
+            # متن کامل برای جستجو
+            full_text = f"{title} {desc}"
+            
             for k in keywords:
-                if re.search(rf"(?<!\w){re.escape(k)}(?!\w)", text, re.IGNORECASE):
+                kw_lower = k.lower()
+                
+                # 🟢 الگوریتم تطبیق پیشرفته‌تر
+                matched = False
+                
+                # تطبیق مستقیم
+                if kw_lower in full_text:
+                    matched = True
+                # تطبیق کلمه‌ای
+                elif any(kw_lower == word for word in full_text.split()):
+                    matched = True
+                # تطبیق جزئی
+                elif any(kw_lower in word for word in full_text.split() if len(word) > 3):
+                    matched = True
+                # تطبیق فازی برای کلمات طولانی
+                elif len(kw_lower) > 4 and self._fuzzy_match(kw_lower, full_text):
+                    matched = True
+                    
+                if matched:
                     global_kw.setdefault(k, []).append((eid, e, f, url))
                     seen_global.add(eid)
-                    # mark seen in safe storage (for admin feeds goes to admin cache, for user feeds to store)
-                    try:
-                        db_seen.add(eid)
-                        self._set_seen_safe(cid_int, url, db_seen)
-                    except Exception:
-                        LOG.debug("failed to set admin cache seen for %s (cid=%s)", url, cid_int, exc_info=True)
-                    break
+                    db_seen.add(eid)
+                    self._set_seen_safe(cid_int, url, db_seen)
+                    break  # فقط برای یک کیورد مچ کن
+
+
+    def _fuzzy_match(self, keyword: str, text: str, threshold: float = 0.8) -> bool:
+        """تطبیق فازی برای کیوردهای مشابه"""
+        if not keyword or not text:
+            return False
+        
+        words = text.split()
+        for word in words:
+            if len(word) < 4:  # فقط کلمات با طول مناسب
+                continue
+                
+            # تطبیق ساده فازی
+            if keyword in word or word in keyword:
+                return True
+                
+            # برای کلمات با طول بیشتر از 5 حرف
+            if len(keyword) > 4 and len(word) > 4:
+                # بررسی تشابه
+                set1, set2 = set(keyword), set(word)
+                similarity = len(set1 & set2) / len(set1 | set2)
+                if similarity > threshold:
+                    return True
+                    
+        return False
 
 
     async def _process_feed(self, app: Application, cid_int: int, url: str, f, chat_lang: str, reporter):
@@ -799,18 +821,20 @@ class RSSService:
         current_feeds = set(self.store.list_feeds(cid_int))
         keywords_exist = bool(self.store.list_keywords(cid_int))
 
-
         # ✅ اگر فید در دیتابیس نیست و نه در admin_feeds است و نه keyword داریم → skip
         if url not in current_feeds and url not in ADMIN_FEEDS and not keywords_exist:
             LOG.info("⏩ skipping %s for chat=%s because feed was removed", url, cid_int)
             return
 
-        if url in AI_FEEDS and url not in ADMIN_FEEDS:
-            LOG.info("Skipping direct processing for AI feed: %s", url)
+        # 🟢 اصلاح: اجازه پردازش فیدهای AI برای کیورد اسکن
+        if url in AI_FEEDS and url not in ADMIN_FEEDS and not keywords_exist:
+            LOG.info("Skipping AI feed without keywords: %s", url)
             return
-        
-        if url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS or "news.google.com/rss" in url:
+
+        # 🟢 اصلاح: فیدهای گلوبال باید برای کیورد اسکن پردازش بشن
+        if (url in ADMIN_FEEDS or url in self.GLOBAL_FEEDS) and not keywords_exist:
             return
+
         
         try:
             
@@ -1091,31 +1115,27 @@ class RSSService:
             keywords = [k["keyword"].lower() for k in self.store.list_keywords(cid_int)]
             admin_candidates: list[str] = ADMIN_FEEDS.copy() if (keywords and ADMIN_FEEDS) else []
 
-            global_candidates: list[str] = self.GLOBAL_FEEDS.copy() if keywords and self.GLOBAL_FEEDS else []
-
-            # --- GLOBAL FEEDS batching ---
+            # 🟢 اصلاح: همیشه global_candidates رو بساز، حتی اگر keywords خالی باشه
+            global_candidates: list[str] = self.GLOBAL_FEEDS.copy() if self.GLOBAL_FEEDS else []
+            
+            # 🟢 اصلاح: batch_global رو همیشه پردازش کن
             global_feeds = global_candidates
-            if keywords and global_feeds:
-                gbatch_size = int(getattr(settings, "global_batch_size", 20))
-
+            if global_feeds:  # حذف شرط keywords
+                gbatch_size = int(getattr(settings, "global_batch_size", 30))  # افزایش به 30
+                
                 gstart = self._cursor_global.get(cid_int, 0)
                 if gstart >= len(global_feeds):
                     gstart = 0
-
+                    
                 gend = min(len(global_feeds), gstart + gbatch_size)
                 batch_global = global_feeds[gstart:gend]
-
                 gnext = gend if gend < len(global_feeds) else 0
                 self._cursor_global[cid_int] = gnext
 
-                LOG.info(
-                    "GLOBAL POLLING chat=%s total=%d batch_size=%d (start=%d end=%d next=%d)",
-                    cid_int, len(global_feeds), gbatch_size, gstart, gend, gnext
-                )
-
+                LOG.info("GLOBAL POLLING chat=%s total=%d batch=%d", cid_int, len(global_feeds), len(batch_global))
             else:
                 batch_global = []
-
+                
             # اگر نه فید کاربر داریم و نه کی‌ورد، رد شو
             if not user_feeds and not keywords:
                 continue

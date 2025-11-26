@@ -23,7 +23,7 @@ class AIFeedsService:
             }
         )
 
-    async def generate_list(self, topic: str, lang: str = "en", max_results: int = 4) -> List[str]:
+    async def generate_list(self, topic: str, lang: str = "en", max_results: int = 7) -> List[str]:
 
         # زبان از کلیدواژه کاربر است
         if lang == "fa":
